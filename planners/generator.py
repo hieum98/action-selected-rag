@@ -1,4 +1,5 @@
 from typing import List, Union
+import time
 from agents.llm_agents import LLMAgent
 from prompts import (
     evaluate,
@@ -15,7 +16,8 @@ class Generator:
             self, 
             online_model_kwargs=None, 
             offline_model_kwargs=None,
-            generate_kwargs={}
+            generate_kwargs={},
+            verbose: bool = False
             ):
         assert online_model_kwargs is not None or offline_model_kwargs is not None, "At least one model configuration must be provided."
         if online_model_kwargs is not None:
@@ -29,6 +31,9 @@ class Generator:
             online_model_kwargs=online_model_kwargs,
             offline_model_kwargs=offline_model_kwargs
         )
+        self.verbose = verbose
+        if self.verbose:
+            print(f"Generator initialized with online model: {online_model_kwargs} and offline model: {offline_model_kwargs}")
 
         # Initialize prompts
         self.evaluate_answer_prompt = evaluate.EVALUATE_ANSWER_PROMPT
@@ -40,6 +45,9 @@ class Generator:
         self.generate_one_next_step_prompt = generate_one_next_step.ONE_NEXT_STEP_PROMPT
         self.one_next_step_examples = None
 
+        self.generate_subquestion_prompt = generate_subquestion_and_answer.GENERATE_SUBQUESTION_PROMPT
+        self.generate_subquestion_examples = None
+
         self.generate_subquestion_and_answer_prompt = generate_subquestion_and_answer.SUBQUESTION_AND_ANSWER_PROMPT
         self.subquestion_and_answer_examples = None
         
@@ -48,6 +56,9 @@ class Generator:
 
         self.rephase_question_prompt = rephase_question.REPHRASE_QUESTION_PROMPT
         self.rephase_question_examples = None
+
+        self.evaluated_retrieved_document_prompt = evaluate.EVALUATE_RETRIEVED_DOCUMENT_PROMPT
+        self.evaluated_retrieved_document_examples = None
 
     def evaluate_answer(self, question: str, correct_answer: Union[str, List[str]], predicted_answer: str):
         """
@@ -68,19 +79,27 @@ class Generator:
             predicted_answer=predicted_answer
         )
         messages = [{'role': 'user', 'content': user_message}]
+        if self.verbose:
+            print("*"* 10)
+            print(f"Evaluating answer with user message: {user_message}")
         agent_input = {
             'messages': messages,
             'json_schema': evaluate.EvaluateAnswerOutput,
             'index': 0
         }
+        start_time = time.time()
         responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to evaluate answer: {time.time() - start_time:.2f} seconds")
         results = []
         reasoning = []
         for response in responses:
             response_object = response.get('output', None)
             if response_object is not None:
                 if isinstance(response_object, evaluate.EvaluateAnswerOutput):
-                    answer_status = response_object.result == 'matched' # True if the predicted answer is matched with the correct answer, False otherwise
+                    # Normalize the decision to lowercase for consistency
+                    answer_status = response_object.decision.lower()  # 'matched' or 'not_matched'
+                    answer_status = answer_status == 'matched' # True if the predicted answer is matched with the correct answer, False otherwise
                     results.append(answer_status)
                     reasoning.append(response_object.reasoning)
                 else:
@@ -94,6 +113,13 @@ class Generator:
             print(f"user_message: {user_message}")
             print(f"Responses: {responses}")
             final_result = False
+        if self.verbose:
+            print(f"Final evaluation result: {final_result}")
+            print(f"Predicted answer: {predicted_answer}")
+            print(f"Correct answer: {correct_answer}")
+            print(f"Results: {results}")
+            print(f"Reasoning: {reasoning}")
+
         return {'result': final_result, 'predicted': predicted_answer, 'answer': correct_answer}
     
     def generate_direct_answer(self, question: str, context: str=None):
@@ -113,12 +139,18 @@ class Generator:
             context=context if context else ""
             )
         messages = [{'role': 'user', 'content': user_message}]
+        if self.verbose:
+            print("*"* 10)
+            print(f"Generating direct answer with user message: {user_message}")
         agent_input = {
             'messages': messages,
             'json_schema': generate_direct_answer.DirectAnswerOutput,
             'index': 0
         }
+        start_time = time.time()
         responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to generate direct answer: {time.time() - start_time:.2f} seconds")
         answers = []
         reasoning = []
         additional_information = []
@@ -132,6 +164,10 @@ class Generator:
                     additional_information.append(response_object.additional_information)
                 else:
                     print(f"Warning: Response object is not of type DirectAnswerOutput: {response_object}")
+        if self.verbose:
+            print(f"Generated answers: {answers}")
+            print(f"Reasoning: {reasoning}")
+            print(f"Additional information: {additional_information}")
         return {
             'answer': answers, # [str] 
             'reasoning': reasoning,
@@ -153,12 +189,18 @@ class Generator:
             context=context if context else ""
             )
         messages = [{'role': 'user', 'content': user_message}]
+        if self.verbose:
+            print("*"* 10)
+            print(f"Generating next step with user message: {user_message}")
         agent_input = {
             'messages': messages,
             'json_schema': generate_one_next_step.OneNextStepOutput,
             'index': 0
         }
+        start_time = time.time()
         responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to generate next step: {time.time() - start_time:.2f} seconds")
         next_steps = []
         justifications = []
         for response in responses:
@@ -170,9 +212,67 @@ class Generator:
                     justifications.append(response_object.justification)
                 else:
                     print(f"Warning: Response object is not of type OneNextStepOutput: {response_object}")
+        if self.verbose:
+            print(f"Generated next steps: {next_steps}")
+            print(f"Justifications: {justifications}")
         return {
             'next_step': next_steps,  # [str]
             'justification': justifications
+        }
+    
+    def generate_subquestion(self, question: str, context: str=None):
+        """
+        Generates a subquestion that logically follows from the main question, along with step-by-step reasoning.
+        
+        Args:
+            question (str): The main question to be answered.
+            context (str, optional): Additional context to inform the subquestion generation.
+        
+        Returns:
+            dict: A dictionary containing the generated subquestion and reasoning.
+        """
+        user_message = self.generate_subquestion_prompt.format(
+            examples=self.generate_subquestion_examples if self.generate_subquestion_examples else "",
+            question=question, 
+            context=context if context else ""
+            )
+        messages = [{'role': 'user', 'content': user_message}]
+        agent_input = {
+            'messages': messages,
+            'json_schema': generate_subquestion_and_answer.SubquestionOutput,
+            'index': 0
+        }
+        if self.verbose:
+            print("*"* 10)
+            print(f"Generating subquestion with user message: {user_message}")
+        start_time = time.time()
+        responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to generate subquestion: {time.time() - start_time:.2f} seconds")
+        subquestions = []
+        reasoning = []
+        main_question_answerable = []
+        for response in responses:
+            response_object = response.get('output', None)
+            if response_object is not None:
+                if isinstance(response_object, generate_subquestion_and_answer.SubquestionOutput):
+                    subquestions.append(response_object.subquestion)
+                    main_question_answerable.append(response_object.answerable_main_question)
+                    reasoning.append(response_object.reasoning)
+                else:
+                    print(f"Warning: Response object is not of type SubquestionOutput: {response_object}")
+        # Majority voting for the main question answerability
+        if len(main_question_answerable) > 0:
+            final_answerable = sum(main_question_answerable) / len(main_question_answerable) >= 0.5
+        if self.verbose:
+            print(f"Generated subquestions: {subquestions}")
+            print(f"Main question answerability: {main_question_answerable}")
+            print(f"Main question answerable: {final_answerable}")
+            print(f"Reasoning: {reasoning}")
+        return {
+            'subquestion': subquestions,  # [str]
+            'main_question_answerable': final_answerable,  # bool
+            'reasoning': reasoning
         }
 
     def generate_subquestion_and_answer(self, question: str, context: str=None):
@@ -197,7 +297,13 @@ class Generator:
             'json_schema': generate_subquestion_and_answer.SubquestionAndAnswerOutput,
             'index': 0
         }
+        if self.verbose:
+            print("*"* 10)
+            print(f"Generating subquestion and answer with user message: {user_message}")
+        start_time = time.time()
         responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to generate subquestion and answer: {time.time() - start_time:.2f} seconds")
         subquestions = []
         answers = []
         reasoning = []
@@ -210,6 +316,10 @@ class Generator:
                     reasoning.append(response_object.reasoning)
                 else:
                     print(f"Warning: Response object is not of type SubquestionAndAnswerOutput: {response_object}")
+        if self.verbose:
+            print(f"Generated subquestions: {subquestions}")
+            print(f"Generated answers: {answers}")
+            print(f"Reasoning: {reasoning}")
         return {
             'subquestion': subquestions,  # [str]
             'answer': answers,  # [str]
@@ -233,12 +343,18 @@ class Generator:
             context=context if context else ""
             )
         messages = [{'role': 'user', 'content': user_message}]
+        if self.verbose:
+            print("*"* 10)
+            print(f"Reanswering subquestion with user message: {user_message}")
         agent_input = {
             'messages': messages,
             'json_schema': reanswer_subquestion.ReanswerOutput,
             'index': 0
         }
+        start_time = time.time()
         responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to reanswer subquestion: {time.time() - start_time:.2f} seconds")
         reanswered_subquestions = []
         reasoning = []
         for response in responses:
@@ -249,6 +365,9 @@ class Generator:
                     reasoning.append(response_object.reasoning)
                 else:
                     print(f"Warning: Response object is not of type ReanswerOutput: {response_object}")
+        if self.verbose:
+            print(f"Reanswered subquestions: {reanswered_subquestions}")
+            print(f"Reasoning: {reasoning}")
         return {
             'reanswered_subquestion': reanswered_subquestions,  # [str]
             'reasoning': reasoning
@@ -271,12 +390,18 @@ class Generator:
             context=context if context else ""
             )
         messages = [{'role': 'user', 'content': user_message}]
+        if self.verbose:
+            print("*"* 10)
+            print(f"Rephrasing question with user message: {user_message}")
         agent_input = {
             'messages': messages,
             'json_schema': rephase_question.RephraseQuestionOutput,
             'index': 0
         }
+        start_time = time.time()
         responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to rephrase question: {time.time() - start_time:.2f} seconds")
         rephrased_questions = []
         reasoning = []
         for response in responses:
@@ -287,6 +412,9 @@ class Generator:
                     reasoning.append(response_object.reasoning)
                 else:
                     print(f"Warning: Response object is not of type RephraseQuestionOutput: {response_object}")
+        if self.verbose:
+            print(f"Rephrased questions: {rephrased_questions}")
+            print(f"Reasoning: {reasoning}")
         return {
             'rephrased_question': rephrased_questions,  # [str]
             'reasoning': reasoning
@@ -298,9 +426,60 @@ class Generator:
     def score_answer():
         pass
 
-    def extract_information_from_retrieved_doc():
-        pass
-
+    def extract_information_from_retrieved_docs(self, question: str, document: Union[str,List[str]], current_step_objective: str=""):
+        """
+        Evaluates the relevance of a retrieved document to a given question and the current step's objective, extracting relevant information if applicable.
+        Args:
+            question (str): The question being addressed.
+            current_step_objective (str): The objective of the current step in the reasoning process.
+            document (List[str]): The document to be evaluated, which can be a list of strings or a single string.
+        Returns:
+            dict: A dictionary containing the evaluation decision, reasoning, and extracted information if the document is relevant.
+        """
+        if isinstance(document, str):
+            document = [document]
+        messages = []
+        for doc in document:
+            user_message = self.evaluated_retrieved_document_prompt.format(
+                examples=self.evaluated_retrieved_document_examples if self.evaluated_retrieved_document_examples else "",
+                question=question, 
+                current_step_objective=current_step_objective,
+                document=doc
+                )
+            messages.append([{'role': 'user', 'content': user_message}])
+        if self.verbose:
+            print("*"* 10)
+            print(f"Evaluating retrieved documents with messages:")
+            for i, msg in enumerate(messages):
+                print(f"Document {i+1}: {msg[0]['content']}")
+        start_time = time.time()
+        responses = self.llm_agent.batch_generate(messages, 
+                                                  response_object=evaluate.EvaluateRetrievedDocumentOutput,
+                                                  n=1) # Don't need to do multiple sampling here
+        if self.verbose:
+            print(f"Time taken to evaluate retrieved documents: {time.time() - start_time:.2f} seconds")
+        results = []
+        reasoning = []
+        extracted_information = []
+        for response in responses: 
+            response_object = response['output'][0].get('output', None)
+            if response_object is not None:
+                if isinstance(response_object, evaluate.EvaluateRetrievedDocumentOutput):
+                    decision = response_object.decision.lower()  # Normalize decision to lowercase
+                    results.append(decision == 'relevant')
+                    reasoning.append(response_object.reasoning)
+                    extracted_information.append(response_object.extracted_information if response_object.decision == 'relevant' else "")
+                else:
+                    print(f"Warning: Response object is not of type EvaluateRetrievedDocumentOutput: {response_object}")
+        if self.verbose:
+            print(f"Results: {results}")
+            print(f"Reasoning: {reasoning}")
+            print(f"Extracted Information: {extracted_information}")
+        return {
+            'decision': results,  # [bool] True if the document is relevant to the question and the current step's objective, False otherwise
+            'reasoning': reasoning,
+            'extracted_information': extracted_information  # [str] Extracted information from the document that is relevant to the question and the current step's objective or an empty string if the document is not relevant
+        }
 
 if __name__ == "__main__":
     # Example usage
@@ -311,12 +490,12 @@ if __name__ == "__main__":
         'concurrency': 64,
     }
     generate_kwargs = {
-        'temperature': 0.7,
+        'temperature': 0.6,
         'n': 3, # should be odd number ás it is used for majority voting
-        'top_p': 0.8,
+        'top_p': 0.95,
         'max_tokens': 8192,
         'top_k': 20,
-        'repetition_penalty': 1.5,
+        'repetition_penalty': 1.1,
         'logprobs': 1,
         'tensor_parallel_size': 1,
     }
@@ -325,18 +504,30 @@ if __name__ == "__main__":
 
     question = "What are the most effective policies governments can implement to combat climate change?"
     context = "Climate change is a pressing global issue that requires immediate action. Governments play a crucial role in implementing policies to mitigate its effects. Effective policies include transitioning to renewable energy sources, implementing carbon pricing, promoting energy efficiency, and enhancing public transportation systems. Additionally, reforestation and conservation efforts can significantly reduce carbon emissions. International cooperation is also essential for addressing this global challenge."
-    direct_answer = genrator.generate_direct_answer(question, context)
-    breakpoint()
-    next_step = genrator.generate_follow_up_reasoning(question)
-    breakpoint()
-    subquestion_and_answer = genrator.generate_subquestion_and_answer(question, context)
-    breakpoint()
-    subquestion_and_answer = genrator.generate_subquestion_and_answer(question)
-    breakpoint()
-    subquestion = "What are the most effective policies governments can implement to combat climate change?"
-    subanswer = "Governments can implement a variety of effective policies to combat climate change, including transitioning to renewable energy sources, implementing carbon pricing, promoting energy efficiency, and enhancing public transportation systems."
-    reanswer = genrator.reanswer_subquestion(subquestion, subanswer)
-    breakpoint()
-    rephrased_question = genrator.rephase_question(question, context)
-    breakpoint()
+    # direct_answer = genrator.generate_direct_answer(question, context)
+    # breakpoint()
+    # next_step = genrator.generate_follow_up_reasoning(question)
+    # breakpoint()
+    # subquestion_and_answer = genrator.generate_subquestion_and_answer(question, context)
+    # breakpoint()
+    # subquestion_and_answer = genrator.generate_subquestion_and_answer(question)
+    # breakpoint()
+    # subquestion = "What are the most effective policies governments can implement to combat climate change?"
+    # subanswer = "Governments can implement a variety of effective policies to combat climate change, including transitioning to renewable energy sources, implementing carbon pricing, promoting energy efficiency, and enhancing public transportation systems."
+    # reanswer = genrator.reanswer_subquestion(subquestion, subanswer)
+    # breakpoint()
+    # rephrased_question = genrator.rephase_question(question, context)
+    # breakpoint()
+    # relevant_docs = [
+    #     "Global warming represents one of the most pressing challenges facing humanity today. Its potential consequences include drastic changes in climate patterns, severe weather events, and impacts on biodiversity and human health. In response, governments around the world have a crucial role to play in addressing these issues. This article seeks to explore the various strategies governments can implement to mitigate the effects of global warming. It will cover a range of approaches, from legislative initiatives to public awareness campaigns, highlighting the importance of collaborative efforts at local, national, and international levels.",
+    #     "Climate change is a pressing global issue that requires immediate action. Governments play a crucial role in implementing policies to mitigate its effects. Effective policies include transitioning to renewable energy sources, implementing carbon pricing, promoting energy efficiency, and enhancing public transportation systems. Additionally, reforestation and conservation efforts can significantly reduce carbon emissions. International cooperation is also essential for addressing this global challenge."
+    # ]
+    # irrelevant_docs = [
+    #     "The history of the Roman Empire is a fascinating subject that has captivated historians and enthusiasts alike. From its humble beginnings as a small city-state to its expansion into a vast empire, the Roman Empire has left an indelible mark on world history. This article will explore the key events, figures, and cultural achievements of the Roman Empire, shedding light on its enduring legacy.",
+    #     "The solar system consists of the Sun and all celestial bodies that are bound by gravity to it, including planets, moons, asteroids, comets, and meteoroids. The eight major planets in our solar system are Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune. Each planet has unique characteristics and features that make it distinct."
+    # ]
+    # docs = relevant_docs + irrelevant_docs
+    # current_step_objective = "Identify the most effective policies governments can implement to combat climate change."
+    # retrieved_docs = genrator.extract_information_from_retrieved_docs(question, docs, current_step_objective)
+    # breakpoint()
 

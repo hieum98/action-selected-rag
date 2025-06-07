@@ -18,7 +18,8 @@ Here are some examples: {examples}
 Now, please reanswer the following question:
 Question: {question}
 Answer: {answer}
-Context: {context}
+Context: 
+{context}
 """
 
 

@@ -15,7 +15,8 @@ Here are some examples: {examples}
 
 Now, please rephrase the following question:
 Question: {question}
-Context: {context}
+Context: 
+{context}
 """
 
 class RephraseQuestionOutput(pydantic.BaseModel):

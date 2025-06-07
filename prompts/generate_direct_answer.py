@@ -18,7 +18,8 @@ Here are some examples: {examples}
 
 Now, please answer the following question:
 Question: {question}
-Context: {context}
+Context: 
+{context}
 """
 
 

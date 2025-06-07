@@ -1,4 +1,5 @@
 from typing import Any, Dict, List
+from functools import partial
 from pydantic import BaseModel
 import openai
 from vllm import LLM, SamplingParams
@@ -32,7 +33,7 @@ class OpenAIClient:
        
         self.concurrency = concurrency
     
-    def generate(self, input: Dict[str, Any]) -> List[Dict[str, str]]:
+    def generate(self, input: Dict[str, Any], **kwargs) -> List[Dict[str, str]]:
         """
         Generate a response from the OpenAI API.
         """
@@ -52,14 +53,14 @@ class OpenAIClient:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                top_p=self.top_p,
-                n=self.num_samples,
-                presence_penalty=self.presence_penalty,
+                temperature=kwargs.get('temperature', self.temperature),
+                max_tokens=kwargs.get('max_tokens', self.max_tokens),
+                top_p=kwargs.get('top_p', self.top_p),
+                n=kwargs.get('n', self.num_samples),
+                presence_penalty=kwargs.get('repetition_penalty', self.presence_penalty),
                 response_format=response_format,
                 extra_body={
-                    "top_k": self.top_k,
+                    "top_k": kwargs.get('top_k', self.top_k),
                     "chat_template_kwargs": {"enable_thinking": True},
                 }
             )
@@ -67,10 +68,14 @@ class OpenAIClient:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                top_p=self.top_p,
-                n=self.num_samples,
+                temperature=kwargs.get('temperature', self.temperature),
+                max_tokens=kwargs.get('max_tokens', self.max_tokens),
+                top_p=kwargs.get('top_p', self.top_p),
+                n=kwargs.get('n', self.num_samples),
+                extra_body={
+                    "top_k": kwargs.get('top_k', self.top_k),
+                    "chat_template_kwargs": {"enable_thinking": True},
+                }
             )
     
         # Extract the generated text from the response
@@ -103,6 +108,7 @@ class OpenAIClient:
             self, 
             batch: List[List[Dict[str, str]]],
             response_object: BaseModel = None,
+            **kwargs
             ) -> List[List[Dict[str, str]]]:
         """
         Generate a batch of responses from the OpenAI API.
@@ -111,8 +117,9 @@ class OpenAIClient:
             assert issubclass(response_object, BaseModel), "response_object must be a subclass of BaseModel"
         batch = [{'index': i, 'messages': messages, 'json_schema': response_object} for i, messages in enumerate(batch)]
         max_workers = min(self.concurrency, len(batch))
+        generate_fn = partial(self.generate, **kwargs)
         with ThreadPool(max_workers=max_workers) as pool:
-            future = pool.map(self.generate, batch)
+            future = pool.map(generate_fn, batch)
             outputs = list(tqdm.tqdm(future.result(), total=len(batch), desc=f"Generating responses from {self.model_name} with OpenAI API"))
         assert len(outputs) == len(batch), f"Expected {len(batch)} outputs, but got {len(outputs)}"
         # Convert outputs to dict with index as key
@@ -140,7 +147,7 @@ class HFAgent:
         self.max_tokens = generate_kwargs.get('max_tokens', 1024) # default max tokens to generate
         self.sampler = multinomial(samples=self.num_samples, temperature=self.temperature, top_p=self.top_p, top_k=self.top_k)
     
-    def generate(self, input: Dict[str, Any]) -> List[Dict[str, str]]:
+    def generate(self, input: Dict[str, Any], **kwargs) -> List[Dict[str, str]]:
         """
         Generate a response from the Hugging Face model.
         """
@@ -162,6 +169,7 @@ class HFAgent:
             self, 
             batch: List[List[Dict[str, str]]],
             response_object: BaseModel = None,
+            **kwargs
             ) -> List[List[Dict[str, str]]]:
         """
         Generate a batch of responses from the Hugging Face model.
@@ -207,7 +215,7 @@ class vLLMAgent:
         self.max_tokens = generate_kwargs.get('max_tokens', 1024)
         self.logprobs = generate_kwargs.get('logprobs', 1)
     
-    def generate(self, input: Dict[str, Any]) -> List[Dict[str, str]]:
+    def generate(self, input: Dict[str, Any], **kwargs) -> List[Dict[str, str]]:
         """
         Generate a response from the vLLM model.
         """
@@ -219,14 +227,14 @@ class vLLMAgent:
         else:
             guided_decoding_params = None
         sampling_params = SamplingParams(
-            temperature=self.temperature,
+            temperature=kwargs.get('temperature', self.temperature),
             guided_decoding=guided_decoding_params,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            repetition_penalty=self.repetition_penalty,
-            n=self.num_samples,
-            logprobs=self.logprobs,
-            max_tokens=self.max_tokens,
+            top_p=kwargs.get('top_p', self.top_p),
+            top_k=kwargs.get('top_k', self.top_k),
+            repetition_penalty=kwargs.get('repetition_penalty', self.repetition_penalty),
+            n= kwargs.get('n', self.num_samples),
+            logprobs=kwargs.get('logprobs', self.logprobs),
+            max_tokens=kwargs.get('max_tokens', self.max_tokens),
         )
         messages = input['messages']
         output = self.model.chat(messages, sampling_params=sampling_params)
@@ -249,6 +257,7 @@ class vLLMAgent:
             self, 
             batch: List[List[Dict[str, str]]],
             response_object: BaseModel = None,
+            **kwargs
             ) -> List[List[Dict[str, str]]]:
         """
         Generate a batch of responses from the vLLM model.
@@ -260,14 +269,14 @@ class vLLMAgent:
         else:
             guided_decoding_params = None
         sampling_params = SamplingParams(
-            temperature=self.temperature,
+            temperature=kwargs.get('temperature', self.temperature),
             guided_decoding=guided_decoding_params,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            repetition_penalty=self.repetition_penalty,
-            n=self.num_samples,
-            logprobs=self.logprobs,
-            max_tokens=self.max_tokens,
+            top_p=kwargs.get('top_p', self.top_p),
+            top_k=kwargs.get('top_k', self.top_k),
+            repetition_penalty=kwargs.get('repetition_penalty', self.repetition_penalty),
+            n=kwargs.get('n', self.num_samples),
+            logprobs=kwargs.get('logprobs', self.logprobs),
+            max_tokens=kwargs.get('max_tokens', self.max_tokens)
         )
         outputs = self.model.chat(batch, sampling_params=sampling_params)
         assert len(outputs) == len(batch), f"Expected {len(batch)} outputs, but got {len(outputs)}"
@@ -311,21 +320,22 @@ class LLMAgent:
             else:
                 raise ValueError(f"Unknown agent type: {agent_type}")
 
-    def generate(self, input: Dict[str, Any]) -> List[Dict[str, str]]:
+    def generate(self, input: Dict[str, Any], **kwargs) -> List[Dict[str, str]]:
         """
         Generate a response from the model.
         """
-        return self.agent.generate(input)
+        return self.agent.generate(input, **kwargs)
     
     def batch_generate(
             self, 
             batch: List[List[Dict[str, str]]],
             response_object: BaseModel = None,
+            **kwargs
             ) -> List[List[Dict[str, str]]]:
         """
         Generate a batch of responses from the model.
         """
-        return self.agent.batch_generate(batch, response_object)
+        return self.agent.batch_generate(batch, response_object, **kwargs)
 
 
 

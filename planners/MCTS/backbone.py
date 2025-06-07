@@ -16,32 +16,32 @@ class Node(ABC):
     """
     A node in the MCTS tree. This is an abstract base class that should be subclassed to implement specific game logic.
     """
-    @abstractmethod
+    # @abstractmethod
     def find_children(self):
         "All possible successors of this board state"
         return set()
 
-    @abstractmethod
+    # @abstractmethod
     def find_random_child(self):
         "Random successor of this board state (for more efficient simulation)"
         return None
 
-    @abstractmethod
+    # @abstractmethod
     def is_terminal(self):
         "Returns True if the node has no children"
         return True
 
-    @abstractmethod
+    # @abstractmethod
     def reward(self):
         "Assumes `self` is terminal node. 1=win, 0=loss, .5=tie, etc"
         return 0
 
-    @abstractmethod
+    # @abstractmethod
     def __hash__(self):
         "Nodes must be hashable"
         return 123456789
 
-    @abstractmethod
+    # @abstractmethod
     def __eq__(node1, node2):
         "Nodes must be comparable"
         return True
