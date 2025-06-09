@@ -17,6 +17,8 @@ class Generator:
             online_model_kwargs=None, 
             offline_model_kwargs=None,
             generate_kwargs={},
+            use_cache: bool = True,
+            cache_dir: str = 'cache/llm_agents',
             verbose: bool = False
             ):
         assert online_model_kwargs is not None or offline_model_kwargs is not None, "At least one model configuration must be provided."
@@ -29,7 +31,9 @@ class Generator:
                 
         self.llm_agent = LLMAgent(
             online_model_kwargs=online_model_kwargs,
-            offline_model_kwargs=offline_model_kwargs
+            offline_model_kwargs=offline_model_kwargs,
+            use_cache=use_cache,
+            cache_dir=cache_dir,
         )
         self.verbose = verbose
         if self.verbose:
@@ -60,6 +64,12 @@ class Generator:
         self.evaluated_retrieved_document_prompt = evaluate.EVALUATE_RETRIEVED_DOCUMENT_PROMPT
         self.evaluated_retrieved_document_examples = None
 
+        self.evaluate_same_question_prompt = evaluate.EVALUATE_SAME_QUESTION_PROMPT
+        self.evaluate_same_question_examples = None
+
+        self.evaluate_answer_given_context_prompt = evaluate.EVALUATE_ANSWER_GIVEN_CONTEXT_PROMPT
+        self.evaluate_answer_given_context_examples = None
+
     def evaluate_answer(self, question: str, correct_answer: Union[str, List[str]], predicted_answer: str):
         """
         Evaluates the quality of a predicted answer against a correct answer.
@@ -73,7 +83,7 @@ class Generator:
             dict: A dictionary containing the evaluation result, the predicted answer, and the correct answer.
         """
         user_message = self.evaluate_answer_prompt.format(
-            exmples=self.eval_examples if self.eval_examples else "",
+            examples=self.eval_examples if self.eval_examples else "",
             question=question, 
             correct_answer=correct_answer, 
             predicted_answer=predicted_answer
@@ -98,29 +108,36 @@ class Generator:
             if response_object is not None:
                 if isinstance(response_object, evaluate.EvaluateAnswerOutput):
                     # Normalize the decision to lowercase for consistency
-                    answer_status = response_object.decision.lower()  # 'matched' or 'not_matched'
-                    answer_status = answer_status == 'matched' # True if the predicted answer is matched with the correct answer, False otherwise
+                    answer_status = response_object.decision
                     results.append(answer_status)
                     reasoning.append(response_object.reasoning)
                 else:
                     print(f"Warning: Response object is not of type EvaluateAnswerOutput: {response_object}")
         # Majority voting for the results
         if len(results) > 0:
-            final_result = sum(results) / len(results) >= 0.5 # True if more than half of the responses are 'matched'
+            confidence = sum(results) / len(results)  # Calculate the confidence level
+            assert 0 <= confidence <= 1, "Confidence should be between 0 and 1"
+            final_result = confidence >= 0.5 # True if more than half of the responses are 'matched'
         else:
             # Print out to help debug the issue
             print(f"Warning: No valid responses received for evaluation")
             print(f"user_message: {user_message}")
             print(f"Responses: {responses}")
             final_result = False
+            confidence = 0.0
+
         if self.verbose:
             print(f"Final evaluation result: {final_result}")
             print(f"Predicted answer: {predicted_answer}")
             print(f"Correct answer: {correct_answer}")
-            print(f"Results: {results}")
+            print(f"Confidence: {confidence:.2f}")
             print(f"Reasoning: {reasoning}")
-
-        return {'result': final_result, 'predicted': predicted_answer, 'answer': correct_answer}
+        return {
+            'result': final_result,  # bool: True if the predicted answer is matched with the correct answer, False otherwise
+            'predicted_answer': predicted_answer,  # str: The predicted answer to be evaluated
+            'correct_answer': correct_answer,  # str or List[str]: The correct answer to the question
+            'confidence': confidence,  # float: Confidence level of the evaluation result
+        }
     
     def generate_direct_answer(self, question: str, context: str=None):
         """
@@ -423,8 +440,71 @@ class Generator:
     def score_reasoning():
         pass
 
-    def score_answer():
-        pass
+    def score_answer(self, question: str, answer: str, context: str=None):
+        """
+        Evaluates the quality of an answer to a question given a context.
+        
+        Args:
+            question (str): The question being answered.
+            answer (str): The answer to be evaluated.
+            context (str, optional): Additional context to inform the evaluation.
+        
+        Returns:
+            dict: A dictionary containing the evaluation result, reasoning, and additional information.
+        """
+        user_message = self.evaluate_answer_given_context_prompt.format(
+            examples=self.evaluate_answer_given_context_examples if self.evaluate_answer_given_context_examples else "",
+            question=question, 
+            answer=answer, 
+            context=context if context else ""
+            )
+        messages = [{'role': 'user', 'content': user_message}]
+        if self.verbose:
+            print("*"* 10)
+            print(f"Evaluating answer with user message: {user_message}")
+        agent_input = {
+            'messages': messages,
+            'json_schema': evaluate.EvaluateAnswerGivenContextOutput,
+            'index': 0
+        }
+        start_time = time.time()
+        responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to evaluate answer given context: {time.time() - start_time:.2f} seconds")
+        results = []
+        reasoning = []
+        for response in responses:
+            response_object = response.get('output', None)
+            if response_object is not None:
+                if isinstance(response_object, evaluate.EvaluateAnswerGivenContextOutput):
+                    decision = response_object.decision
+                    decision = decision.lower()
+                    if decision == 'aligned':
+                        results.append(1)
+                    elif decision == 'in_conflict':
+                        results.append(0)
+                    elif decision == 'cannot_be_determined':
+                        results.append(0.5)
+                    reasoning.append(response_object.reasoning)
+                else:
+                    print(f"Warning: Response object is not of type EvaluateAnswerGivenContextOutput: {response_object}")
+        # Majority voting for the results
+        if len(results) > 0:
+            score = sum(results) / len(results)  # Calculate the score
+            assert 0 <= score <= 1, "Score should be between 0 and 1"
+        
+        if self.verbose:
+            print(f"Final evaluation result: {score}")
+            print(f"Question: {question}")
+            print(f"Answer: {answer}")
+            print(f"Context: {context}")
+            print(f"Reasoning: {reasoning}")
+        return {
+            'score': score,  # float: Score of the answer given the context, between 0 and 1
+            'question': question,  # str: The question being answered
+            'answer': answer,  # str: The answer to be evaluated
+            'reasoning': reasoning  # [str]: Reasoning behind the evaluation
+        }
 
     def extract_information_from_retrieved_docs(self, question: str, document: Union[str,List[str]], current_step_objective: str=""):
         """
@@ -480,6 +560,60 @@ class Generator:
             'reasoning': reasoning,
             'extracted_information': extracted_information  # [str] Extracted information from the document that is relevant to the question and the current step's objective or an empty string if the document is not relevant
         }
+
+    def evaluate_same_question(self, question_1: str, question_2: str):
+        """
+        Evaluates whether two questions are the same or not.
+        
+        Args:
+            question_1 (str): The first question to be compared.
+            question_2 (str): The second question to be compared.
+        
+        Returns:
+            dict: A dictionary containing the evaluation decision and reasoning.
+        """
+        user_message = self.evaluate_same_question_prompt.format(
+            examples=self.evaluate_same_question_examples if self.evaluate_same_question_examples else "",
+            question_1=question_1, 
+            question_2=question_2
+            )
+        messages = [{'role': 'user', 'content': user_message}]
+        if self.verbose:
+            print("*"* 10)
+            print(f"Evaluating same question with user message: {user_message}")
+        agent_input = {
+            'messages': messages,
+            'json_schema': evaluate.EvaluateSameQuestionOutput,
+            'index': 0
+        }
+        start_time = time.time()
+        responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to evaluate same question: {time.time() - start_time:.2f} seconds")
+        results = []
+        reasoning = []
+        for response in responses:
+            response_object = response.get('output', None)
+            if response_object is not None:
+                if isinstance(response_object, evaluate.EvaluateSameQuestionOutput):
+                    results.append(response_object.decision)  # True if the two questions are the same, False otherwise
+                    reasoning.append(response_object.reasoning)
+                else:
+                    print(f"Warning: Response object is not of type EvaluateSameQuestionOutput: {response_object}")
+
+        # Majority voting for the results
+        if len(results) > 0:
+            final_result = sum(results) / len(results) >= 0.5
+        else:
+            # Print out to help debug the issue
+            print(f"Warning: No valid responses received for evaluating same question")
+            print(f"user_message: {user_message}")
+            print(f"Responses: {responses}")
+            final_result = False
+        if self.verbose:
+            print(f"Final evaluation result: {results}")
+            print(f"Reasoning: {reasoning}")
+        return {'decision': final_result, 'reasoning': reasoning}
 
 if __name__ == "__main__":
     # Example usage

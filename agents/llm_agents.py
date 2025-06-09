@@ -1,4 +1,8 @@
+import copy
+import os
 from typing import Any, Dict, List
+import json
+from hashlib import sha256
 from functools import partial
 from pydantic import BaseModel
 import openai
@@ -304,12 +308,16 @@ class LLMAgent:
             self,
             online_model_kwargs: Dict[str, Any] = None,
             offline_model_kwargs: Dict[str, Any] = None,
+            use_cache: bool = True,
+            cache_dir: str = 'cache/llm_agents',
             ):
         assert online_model_kwargs is not None or offline_model_kwargs is not None, "At least one of online_model_kwargs or offline_model_kwargs must be provided."
         if online_model_kwargs is not None:
             print("Using online model with OpenAI API")
+            model_name = online_model_kwargs['model_name']
             self.agent = OpenAIClient(**online_model_kwargs)
         elif offline_model_kwargs is not None:
+            model_name = offline_model_kwargs['model_name']
             agent_type = offline_model_kwargs.pop('agent_type', 'vllm')
             if agent_type == 'vllm':
                 print("Using offline model with vLLM")
@@ -319,12 +327,65 @@ class LLMAgent:
                 self.agent = HFAgent(**offline_model_kwargs)
             else:
                 raise ValueError(f"Unknown agent type: {agent_type}")
+        self.use_cache = use_cache
+        self.cache_dir = os.path.join(cache_dir, model_name)
+        # Ensure cache directory exists
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+    def load_from_cache(self, cache_file: str, response_class, index) -> Dict[str, Any]:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            assert 'output' in data, "Cached response must contain 'output' key"
+            response = {
+                'index': index,
+                'input': data['input'],
+            }
+            output = []
+            for item in data['output']:
+                if response_class is not None:
+                    assert issubclass(response_class, BaseModel), "response_class must be a subclass of BaseModel"
+                    item['output'] = response_class.model_validate_json(item['output'])
+                output.append(item)
+            response['output'] = output
+        return response
+    
+    def save_to_cache(self, cache_file: str, response: Dict[str, Any]) -> None:
+        """
+        Save the response to cache.
+        """
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            to_save_response = copy.deepcopy(response)
+            output = to_save_response.pop('output', None)
+            serialized_output = []
+            for item in output:
+                if isinstance(item['output'], BaseModel):
+                    item['output'] = item['output'].model_dump_json()
+                serialized_output.append(item)
+            to_save_response['output'] = serialized_output
+            json.dump(to_save_response, f)
 
     def generate(self, input: Dict[str, Any], **kwargs) -> List[Dict[str, str]]:
         """
         Generate a response from the model.
         """
-        return self.agent.generate(input, **kwargs)
+        use_cache = kwargs.pop('use_cache', self.use_cache)
+        input_messages = input['messages']
+        response_class = input.get('json_schema', None)
+        if response_class is not None:
+            assert issubclass(response_class, BaseModel), "response_class must be a subclass of BaseModel"
+        input_str = f"messages: {input_messages}, json_schema: {response_class}, kwargs: {kwargs}"
+        input_hash = sha256(input_str.encode('utf-8')).hexdigest()
+        if use_cache:
+            cache_file = f"{self.cache_dir}/{input_hash}.json"
+            try:
+                response = self.load_from_cache(cache_file, response_class, input['index'])
+                print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
+                return response
+            except:
+                response = self.agent.generate(input, **kwargs)
+                # Save the response to cache
+                self.save_to_cache(cache_file, response)
+                return response
     
     def batch_generate(
             self, 
@@ -335,8 +396,39 @@ class LLMAgent:
         """
         Generate a batch of responses from the model.
         """
-        return self.agent.batch_generate(batch, response_object, **kwargs)
+        batch_with_index = [{'index': i, 'messages': messages} for i, messages in enumerate(batch)]
+        use_cache = kwargs.pop('use_cache', self.use_cache)
+        responses = []
+        to_compute = []
+        for item in batch_with_index:
+            input_str = f"messages: {item['messages']}, json_schema: {response_object}, kwargs: {kwargs}"
+            input_hash = sha256(input_str.encode('utf-8')).hexdigest()
+            if use_cache:
+                cache_file = f"{self.cache_dir}/{input_hash}.json"
+                try:
+                    cached_response = self.load_from_cache(cache_file, response_object, item['index'])
+                    print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
+                    responses.append(cached_response)
+                except:
+                    item['hash'] = input_hash
+                    to_compute.append(item)
+        if len(to_compute) == 0:
+            return responses
+        to_compute_batch = [item['messages'] for item in to_compute]
+        to_compute_output = self.agent.batch_generate(to_compute_batch, response_object, **kwargs)
+        # Save the responses to cache
+        for item, output in zip(to_compute, to_compute_output):
+            input_hash = item['hash']
+            _output = copy.deepcopy(output)
+            _output['index'] = item['index']
+            responses.append(_output)
+            cache_file = f"{self.cache_dir}/{input_hash}.json"
+            self.save_to_cache(cache_file, output)
 
+        # Sort responses by index to maintain order
+        responses.sort(key=lambda x: x['index'])
+        assert len(responses) == len(batch), f"Expected {len(batch)} responses, but got {len(responses)}"
+        return responses
 
 
 if __name__ == "__main__":
@@ -344,8 +436,8 @@ if __name__ == "__main__":
     # Run on server
     # python -m sglang.launch_server --host 0.0.0.0 --model-path Qwen/Qwen3-8B --reasoning-parser qwen3 # --port 30000 
     online_model_kwargs = {
-        'model_name': 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B',
-        'url': 'http://n0154.talapas.uoregon.edu:30000/v1',
+        'model_name': 'qwen3-32b',
+        'url': 'http://n0998.talapas.uoregon.edu:30000/v1',
         'api_key': 'None',
         'concurrency': 64,
     }
@@ -356,12 +448,12 @@ if __name__ == "__main__":
     }
 
     generate_kwargs = {
-        'temperature': 0.7,
-        'n': 3, # should be odd number ás it is used for majority voting
-        'top_p': 0.8,
+        'temperature': 0.6,
+        'n': 1, # should be odd number ás it is used for majority voting
+        'top_p': 0.95,
         'max_tokens': 8192,
         'top_k': 20,
-        'repetition_penalty': 1.5,
+        'repetition_penalty': 1.1,
         'logprobs': 1,
         'tensor_parallel_size': 1,
     }
@@ -376,6 +468,7 @@ if __name__ == "__main__":
 
     queries = [
         [{'role': 'user', 'content': 'What is the capital of France? Please provide a JSON response'}],
+        [{'role': 'user', 'content': 'What is the capital of Japan? Please provide a JSON response'}],
         [{'role': 'user', 'content': 'What is the capital of Germany? Please provide a JSON response'}],
     ]
 

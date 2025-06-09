@@ -1,9 +1,14 @@
+import random
+import copy
+import json
 from enum import Enum, unique
+from hashlib import sha256
 from typing import List, Optional, Union
-from planners.MCTS.backbone import Node
+
+import tqdm
+from planners.MCTS.backbone import MCTS, Node
 from planners.generator import Generator
 from planners.retriever import Retriever
-
 
 @unique
 class NodeType(Enum):
@@ -41,15 +46,25 @@ class ReasoningNode(Node):
             reasoning: Optional[str] = None,
             # Optional parameters
             refine_retrieved_docs: bool = True,
+            max_depth: int = 5,
+            golden_answer: Optional[Union[str, List[str]]] = None,
+            user_question: Optional[str] = None,
+            **kwargs
     ):  
         super().__init__()
+        self.node_config = {
+            "max_depth": max_depth,  # Maximum depth of the reasoning tree
+            "refine_retrieved_docs": refine_retrieved_docs,  # Whether to refine retrieved documents before reasoning
+            "golden_answer": golden_answer,  # The golden answer for the user question, if available
+            "user_question": user_question,  # The main user question for USER_QUESTION nodes
+        }
         self.parent = parent # Parent node in the MCTS tree, if none, this is the root node
         self.children: List["ReasoningNode"] = [] # Children nodes in the MCTS tree
         self.depth = depth
         self.generator = generator
         self.retriever = retriever
         self.node_type = node_type
-        self.refine_retrieved_docs = refine_retrieved_docs  # Whether to refine retrieved documents before reasoning
+        self.refine_retrieved_docs = self.node_config['refine_retrieved_docs']  # Whether to refine retrieved documents before reasoning
         self.node_content = {
             "user_question": None,  # The main user question for USER_QUESTION nodes
             "direct_answer": None,  # The direct answer for DIRECT_ANSWER nodes
@@ -60,6 +75,7 @@ class ReasoningNode(Node):
         if node_type == NodeType.USER_QUESTION:
             assert question is not None, "User question must be provided for USER_QUESTION nodes."
             self.node_content["user_question"] = question
+            self.node_config['user_question'] = question
             self.depth = 0  # Root node has depth 0
             self.parent = None  # Root node has no parent
         elif node_type == NodeType.DIRECT_ANSWER:
@@ -118,6 +134,8 @@ class ReasoningNode(Node):
                 step_content = f"{node.node_content['subquestion']}\n {node.node_content['subanswer']}"
                 # If the previous node is a SUBQUESTION, replace the subanswer with the resubanswer
                 reasoning_trace[-1] = step_content
+            elif node.node_type == NodeType.DIRECT_ANSWER:
+                reasoning_trace.append(node.node_content["reasoning"])
         trace = ""
         for i, step in enumerate(reasoning_trace):
             trace += f"Step {i+1}: {step}\n"
@@ -134,7 +152,11 @@ class ReasoningNode(Node):
         Returns:
             str: A string representation of the retrieved supporting information.
         """
-        retrieved_documents = self.retriever.search(query, instruction=instruction, top_k=top_k)['retrieved_docs']
+        try:
+            retrieved_documents = self.retriever.search(query, instruction=instruction, top_k=top_k)['retrieved_docs']
+        except:
+            print(f"Error retrieving documents for query: {query}")
+            return ""
         if self.refine_retrieved_docs:
             output = self.generator.extract_information_from_retrieved_docs(
                 question=main_query,
@@ -180,6 +202,7 @@ class ReasoningNode(Node):
                 question=user_question,
                 answer=answer,
                 reasoning=reasoning,
+                **self.node_config  # Pass the node configuration to the new node
             )
             nodes.append(node)
         return nodes
@@ -204,6 +227,7 @@ class ReasoningNode(Node):
                 generator=self.generator,
                 retriever=self.retriever,
                 reasoning=next_step,
+                **self.node_config  # Pass the node configuration to the new node
             )
             nodes.append(node)
         return nodes
@@ -231,6 +255,7 @@ class ReasoningNode(Node):
                     question=question,
                     answer=answer,
                     reasoning=None,  # Subquestions do not have reasoning content
+                    **self.node_config  # Pass the node configuration to the new node
                 )
                 nodes.append(node)
             return nodes
@@ -258,6 +283,7 @@ class ReasoningNode(Node):
                             question=subquestion,
                             answer=answer,
                             reasoning=None,  # Subquestions do not have reasoning content
+                            **self.node_config  # Pass the node configuration to the new node
                         )
                         nodes.append(node)
                 return nodes
@@ -287,6 +313,7 @@ class ReasoningNode(Node):
                 question=question,
                 answer=answer,
                 reasoning=None,  # Resubquestions do not have reasoning content
+                **self.node_config  # Pass the node configuration to the new node
             )
             nodes.append(node)
         return nodes
@@ -313,16 +340,166 @@ class ReasoningNode(Node):
                 generator=self.generator,
                 retriever=self.retriever,
                 question=rephrased_question,
+                **self.node_config  # Pass the node configuration to the new node
             )
             nodes.append(node)
         return nodes
 
     def find_children(self):
+        """
+        Find and generate children nodes based on the current node type.
+        Returns:
+            List[ReasoningNode]: A list of generated child nodes based on the current node type.
+        """
+        if self.children:
+            return self.children
+        
+        # Generate children based on the node type if it has not been generated yet
         if self.node_type == NodeType.USER_QUESTION:
-            pass
-
+            direct_answer_nodes = self.generate_direct_answer_node()
+            reasoning_nodes = self.generate_reasoning_node()
+            subquestion_nodes = self.generate_subquestion_node()
+            rephrase_question_nodes = self.generate_rephrase_question_node()
+            children = direct_answer_nodes + reasoning_nodes + subquestion_nodes + rephrase_question_nodes
+        elif self.node_type == NodeType.DIRECT_ANSWER:
+            # Direct answer nodes do not generate children, they are leaf nodes
+            raise ValueError("Direct answer nodes do not generate children, they are leaf nodes.")
+        elif self.node_type == NodeType.REASONING:
+            direct_answer_nodes = self.generate_direct_answer_node()
+            subquestion_nodes = self.generate_subquestion_node()
+            reasoning_nodes = self.generate_reasoning_node()
+            children = direct_answer_nodes + subquestion_nodes + reasoning_nodes
+        elif self.node_type == NodeType.SUBQUESTION:
+            direct_answer_nodes = self.generate_direct_answer_node()
+            resubquestion_nodes = self.generate_resubquestion_node()
+            reasoning_nodes = self.generate_reasoning_node()
+            rephrase_question_nodes = self.generate_rephrase_question_node()
+            subquestion_nodes = self.generate_subquestion_node()
+            children = direct_answer_nodes + resubquestion_nodes + reasoning_nodes + rephrase_question_nodes + subquestion_nodes
+        elif self.node_type == NodeType.RESUBQUESTION:
+            direct_answer_nodes = self.generate_direct_answer_node()
+            reasoning_nodes = self.generate_reasoning_node()
+            subquestion_nodes = self.generate_subquestion_node()
+            children = direct_answer_nodes + reasoning_nodes + subquestion_nodes
+        elif self.node_type == NodeType.REPHASE_QUESTION:
+            subquestion_nodes = self.generate_subquestion_node()
+            children = subquestion_nodes
+        else:
+            raise ValueError(f"Invalid node type: {self.node_type}")
+        assert len(children) > 0, f"No children generated for node type: {self.print_node()}"
+        self.children = children
+        return self.children
+    
+    def is_valid_leaf(self) -> bool:
+        """
+        Check if the current node is a valid leaf node.
+        Returns:
+            bool: True if the node is a valid leaf, False otherwise.
+        """
+        if self.node_type == NodeType.DIRECT_ANSWER:
+            return True
+        elif self.node_type == NodeType.SUBQUESTION:
+            user_question = self.node_config['user_question']
+            subquestion = self.node_content["subquestion"]
+            is_same_question = self.generator.evaluate_same_question(question_1=user_question, question_2=subquestion)
+            if is_same_question['decision']:
+                # If the subquestion is the same as the user question, it is a valid leaf
+                return True
+        return False
+    
+    def is_terminal(self) -> bool:
+        return self.depth > self.node_config['max_depth'] or self.is_valid_leaf()
+    
+    def reward(self) -> float:
+        """
+        Calculate the reward for the current node.
+        The reward is based on the node type and content.
+        Returns:
+            float: The reward value for the node.
+        """
+        if self.is_valid_leaf():
+            if self.node_type == NodeType.DIRECT_ANSWER:
+                answer = self.node_content["direct_answer"]
+                reasoning = self.node_content["reasoning"]
+            elif self.node_type == NodeType.SUBQUESTION:
+                answer = self.node_content["subanswer"]
+                reasoning = ""
+            user_question = self.node_config['user_question']
+            if 'golden_answer' in self.node_config:
+                print(f"Evaluating question: {user_question}, answer: {answer}, golden_answer: {self.node_config['golden_answer']}")       
+                golden_answer = self.node_config['golden_answer']
+                output = self.generator.evaluate_answer(question=user_question, correct_answer=golden_answer, predicted_answer=answer)
+                reward = output['confidence']
+            else:
+                print(f"Evaluating question: {user_question}, answer: {answer}, golden_answer: None")
+                query = f"{user_question}\n{answer}, {reasoning}" if reasoning else f"{user_question}\n{answer}"
+                supporting_information_for_qa = self.get_supporting_information(query=query, instruction="query: ")
+                supporting_information_for_q = self.get_supporting_information(query=user_question, instruction="query: ")
+                supporting_information = f"\t**Retrieved information for question and answer**\n{supporting_information_for_qa}\n\t**Retrieved information for question**\n{supporting_information_for_q}"
+                output = self.generator.score_answer(question=user_question, answer=answer, context=supporting_information)
+                reward = output['score']
+        else:
+            # If the node is not a valid leaf, return a reward of 0
+            reward = 0.0
+        return reward
+    
+    def find_random_child(self):
+        if self.is_terminal():
+            return None  # If the node is terminal, return None
+        node_children = self.find_children()
+        random_child = random.choice(node_children) if node_children else None
+        return random_child  # Return a random child node, or None if there are no children
+        
+    def __hash__(self):
+        """
+        Hash function for the ReasoningNode to use it as a key in dictionaries.
+        The hash is based on the node content and type, depth, and parent node hash.
+        This ensures that nodes with the same content and type will have the same hash value.
+        Returns:
+            int: A hash value based on the node content and type.
+        """
+        node_content_str = "\n".join(["{}: {}".format(k, v) for k, v in self.node_content.items()])
+        node_content_str = node_content_str + f"\nnode_type: {self.node_type.value}\ndepth: {self.depth}"
+        if self.parent is None:
+            return  0  # If the node has no parent, return 0 as the hash value
+        else:
+            parent_hash = hash(self.parent) # Use the hash of the parent node to ensure uniqueness
+        node_content_str = node_content_str + f"\nparent_hash: {parent_hash}"
+        return int(sha256(node_content_str.encode('utf-8')).hexdigest(), 16) % (10 ** 8)  # Use a large prime number for better distribution
+    
+    def __eq__(self, other):
+        """
+        Equality check for the ReasoningNode.
+        Two nodes are considered equal if they have same hash value, i.e., same content, type, depth, and parent.
+        Args:
+            other (ReasoningNode): The other node to compare with.
+        Returns:
+            bool: True if the nodes are equal, False otherwise.
+        """
+        if not isinstance(other, ReasoningNode):
+            return False
+        same_hash = hash(self) == hash(other)
+        same_content = self.node_content == other.node_content
+        same_type = self.node_type == other.node_type
+        same_depth = self.depth == other.depth
+        return same_hash and same_content and same_type and same_depth
+        
+    def print_node(self):
+        """
+        Print the node content in a readable format.
+        """
+        node_content = copy.deepcopy(self.node_content)
+        node_content['node_type'] = self.node_type.value
+        node_content['depth'] = self.depth
+        node_content['parent'] = hash(self.parent) if self.parent else None
+        print("Node content:")
+        for key, value in node_content.items():
+            print(f"{key}: {value}")
+                
 
 if __name__=='__main__':
+    from planners.MCTS.reasoning_node import *
+
     # Example usage
     generator_online_model_kwargs = {
         'model_name': 'qwen3-32b',
@@ -357,7 +534,62 @@ if __name__=='__main__':
         generator=generator,
         retriever=retriever,
         question=question,
+        refine_retrieved_docs=True,
     )
+
+    print("Root node created:")
+    root_node.print_node()
+    print("Finding children nodes...")
+    children = root_node.find_children()
+    print(f"Found {len(children)} children nodes:")
+    for child in children:
+        child.print_node()
+    print("Finding random child node...")
+    random_child = root_node.find_random_child()
+    if random_child:
+        print("Random child node found:")
+        random_child.print_node()
+    else:
+        print("No random child node found.")
+    print("Generating direct answer node...")
+    direct_answer_nodes = root_node.generate_direct_answer_node()
+    print(f"Generated {len(direct_answer_nodes)} direct answer nodes:")
+    for node in direct_answer_nodes:
+        node.print_node()
+    print("Generating reasoning node...")
+    reasoning_nodes = root_node.generate_reasoning_node()
+    print(f"Generated {len(reasoning_nodes)} reasoning nodes:")
+    for node in reasoning_nodes:
+        node.print_node()
+    print("Generating subquestion node...")
+    subquestion_nodes = root_node.generate_subquestion_node()
+    print(f"Generated {len(subquestion_nodes)} subquestion nodes:")
+    for node in subquestion_nodes:
+        node.print_node()
+    print("Generating resubquestion node...")
+    resubquestion_nodes = subquestion_nodes[0].generate_resubquestion_node()  # Generate resubquestion from the first subquestion node
+    print(f"Generated {len(resubquestion_nodes)} resubquestion nodes:")
+    for node in resubquestion_nodes:
+        node.print_node()
+    print("Generating rephrase question node...")
+    rephrase_question_nodes = root_node.generate_rephrase_question_node()
+    print(f"Generated {len(rephrase_question_nodes)} rephrase question nodes:")
+    for node in rephrase_question_nodes:
+        node.print_node()
+    print("Finding children nodes again...")
+    children = root_node.find_children()
+    print(f"Found {len(children)} children nodes after generating all types:")
+    for child in children:
+        child.print_node()
+    print("Checking if the root node is terminal...")
+    is_terminal = root_node.is_terminal()
+    print(f"Is the root node terminal? {is_terminal}")
+    print("Checking if the root node is a valid leaf...")
+    is_valid_leaf = root_node.is_valid_leaf()
+    print(f"Is the root node a valid leaf? {is_valid_leaf}")
+    print("Calculating reward for the root node...")
+    reward = root_node.reward()
+    print(f"Reward for the root node: {reward}")        
 
 
 

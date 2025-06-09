@@ -16,7 +16,7 @@ class Node(ABC):
     """
     A node in the MCTS tree. This is an abstract base class that should be subclassed to implement specific game logic.
     """
-    # @abstractmethod
+    @abstractmethod
     def find_children(self):
         "All possible successors of this board state"
         return set()
@@ -26,35 +26,41 @@ class Node(ABC):
         "Random successor of this board state (for more efficient simulation)"
         return None
 
-    # @abstractmethod
+    @abstractmethod
     def is_terminal(self):
         "Returns True if the node has no children"
         return True
 
-    # @abstractmethod
+    @abstractmethod
     def reward(self):
         "Assumes `self` is terminal node. 1=win, 0=loss, .5=tie, etc"
         return 0
 
-    # @abstractmethod
+    @abstractmethod
     def __hash__(self):
         "Nodes must be hashable"
         return 123456789
 
-    # @abstractmethod
+    @abstractmethod
     def __eq__(node1, node2):
         "Nodes must be comparable"
         return True
+    
+    @abstractmethod
+    def print_node(self):
+        "Print the node in a human-readable format"
+        pass
 
 
 class MCTS:
     "Monte Carlo tree searcher. First rollout the tree then choose a move."
 
-    def __init__(self, exploration_weight=1):
+    def __init__(self, exploration_weight=1, verbose=False):
         self.Q: Dict[Node, float] = defaultdict(float)  # Total reward for each node
         self.N: Dict[Node, int] = defaultdict(int) # Number of visits for each node
         self.children: Dict[Node, List[Node]] = dict() # Children of each node
         self.exploration_weight = exploration_weight # Weight of exploration vs exploitation
+        self.verbose = verbose # If True, print debug information
 
     def choose(self, node: Node):
         """
@@ -128,6 +134,14 @@ class MCTS:
         if node.is_terminal():
             return # Terminal node, no children to expand
         self.children[node] = node.find_children()
+        if self.verbose:
+            print(f"Expanding node:")
+            node.print_node()
+            print(f"Found {len(self.children[node])} children:")
+            for i, child in enumerate(self.children[node]):
+                print("*" * 10)
+                print(f"Child {i}:")
+                child.print_node()
     
     def _simulate(self, node: Node):
         """
@@ -136,7 +150,7 @@ class MCTS:
         """
         while True:
             if node.is_terminal():
-                return node.reward()
+                return node
             # if the node is not terminal, select a random child and go to the next layer
             node = node.find_random_child()
     
@@ -151,7 +165,26 @@ class MCTS:
         Perform a rollout from the given node to a terminal state and update the tree's nodes reward and visit counts by using backpropagation.
         """
         path = self._select(node) # Select a path to expand
+        if self.verbose:
+            print("Selected path for rollout:")
+            for i, n in enumerate(path):
+                print(f"Step {i}: ")
+                n.print_node()
         leaf = path[-1] # The last node in the path is the leaf node
         self._expand(leaf) # Expand the the tree with the children of the leaf node
-        reward = self._simulate(leaf) # Simulate a random game from the leaf node to a terminal state
+        simulated_node = self._simulate(leaf) # Simulate a random game from the leaf node to a terminal state
+        if self.verbose:
+            print(f"Simulated node:")
+            simulated_node.print_node()
+        reward = simulated_node.reward()
+        if self.verbose:
+            print(f"Reward for the simulated node: {reward}")
         self._backpropagate(path, reward)
+        if self.verbose:
+            print("Backpropagating the reward:")
+            for i, n in enumerate(path):
+                print(f"Step {i}:")
+                n.print_node()
+                print(f"Reward: {self.Q[n]}, Visits: {self.N[n]}")
+        return simulated_node
+    
