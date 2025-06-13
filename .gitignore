@@ -3,3 +3,4 @@ draft.ipynb
 data
 indexes
 mcts_trees
+cache/*

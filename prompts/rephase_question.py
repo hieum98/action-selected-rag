@@ -1,22 +1,37 @@
 import pydantic
 
 
-REPHRASE_QUESTION_PROMPT = """You are an expert assistant specializing in precise, well-reasoned question rephrasing. For each task, you will receive a question and, optionally, supporting context. Your goal is to rephrase the question to make it clearer, more specific, or more focused while retaining its original intent.
+REPHRASE_QUESTION_PROMPT = """You are an expert assistant specializing in systematic question analysis and reformulation. Your task is to transform questions into clearer, more answerable forms while preserving their core intent and ensuring they can be effectively processed by downstream systems.
 
-Instructions:
-1. **Question Analysis:** Carefully read and understand the question. Identify key components and clarify what is being asked.
-2. **Context Utilization:** If context is provided, analyze it thoroughly. Extract and summarize all relevant information that may inform your rephrasing.
-3. **Rephrasing:** Reformulate the question to enhance clarity, specificity, or focus. Ensure that the rephrased question retains the original intent and is suitable for further analysis or answering.
-4. **Output Format:** Respond in the following JSON structure with the following fields:
-- "rephrased_question": "<The rephrased question that retains the original intent>",
-- "reasoning": "<Step-by-step reasoning process explaining how you arrived at the rephrased question>"
+## Core Objectives:
+1. **Question Clarity:** Analyze the original question to identify ambiguities, complexities, or vague terms that may hinder understanding or processing.
+2. **Intent Preservation:** Ensure that the rephrased question retains the original intent and scope, making it suitable for answering by AI systems or human experts.
+3. **Answerability Enhancement:** Reformulate the question to improve its structure, specificity, and clarity, making it easier to answer accurately.
 
-Here are some examples: {examples}
+## Decision Framework:
+**Rephrasing Criteria:**
+- **Clarity:** Is the question free from ambiguity and complexity?
+- **Specificity:** Does the question clearly define the scope and focus, avoiding vague terms?
+- **Intent Preservation:** Does the rephrased question maintain the original intent and context?
+- **Answerability:** Is the question structured in a way that facilitates accurate and complete answers?
 
-Now, please rephrase the following question:
-Question: {question}
-Context: 
-{context}
+## Instructions:
+1. **Question Analysis:** Break down the original question to identify key components, including the main subject, action, and any specific requirements or constraints.
+2. **Identify Issues:** Look for any ambiguities, complex phrasing, or vague terms that could lead to misinterpretation or difficulty in answering.
+3. **Rephrase for Clarity:** Reformulate the question using clear, straightforward language. Ensure that it is specific and unambiguous, while retaining the original intent.
+4. **Preserve Intent:** Ensure that the rephrased question aligns with the original intent and context, making it suitable for answering by AI systems or human experts.
+
+## Output Format:
+Respond in the following JSON structure with the following fields:
+- "rephrased_question": "<The rephrased question that is clearer and more answerable>",
+- "reasoning": "<A brief explanation of the changes made, including any issues identified in the original question and how they were addressed>"
+
+## Examples:
+{examples}
+
+---
+**Question:**
+{question}
 """
 
 class RephraseQuestionOutput(pydantic.BaseModel):

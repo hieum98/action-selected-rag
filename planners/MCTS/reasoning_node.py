@@ -44,6 +44,7 @@ class ReasoningNode(Node):
             question: Optional[str] = None,
             answer: Optional[str] = None,
             reasoning: Optional[str] = None,
+            confidence: Optional[float] = None,
             # Optional parameters
             refine_retrieved_docs: bool = True,
             max_depth: int = 5,
@@ -71,6 +72,7 @@ class ReasoningNode(Node):
             "subquestion": None,  # The subquestion of the parent node for SUBQUESTION nodes
             "subanswer": None,  # The subanswer of the parent node for SUBQUESTION nodes
             "reasoning": None,  # The reasoning content for REASONING nodes
+            "confidence": None,  # The confidence score for the node, used for evaluation
         }
         if node_type == NodeType.USER_QUESTION:
             assert question is not None, "User question must be provided for USER_QUESTION nodes."
@@ -84,19 +86,23 @@ class ReasoningNode(Node):
             self.node_content["user_question"] = question
             self.node_content["direct_answer"] = answer
             self.node_content["reasoning"] = reasoning
+            self.node_content["confidence"] = confidence
         elif node_type == NodeType.REASONING:
             assert reasoning is not None, "Reasoning content must be provided for REASONING nodes."
             self.node_content["reasoning"] = reasoning
+            self.node_content["confidence"] = confidence
         elif node_type == NodeType.SUBQUESTION:
             assert question is not None, "Subquestion must be provided for SUBQUESTION nodes."
             assert answer is not None, "Subanswer must be provided for SUBQUESTION nodes."
             self.node_content["subquestion"] = question
             self.node_content['subanswer'] = answer
+            self.node_content["confidence"] = confidence
         elif node_type == NodeType.RESUBQUESTION:
             assert question is not None, "Resubquestion must be provided for RESUBQUESTION nodes."
             assert answer is not None, "Resubanswer must be provided for RESUBQUESTION nodes."
             self.node_content["subquestion"] = question
             self.node_content['subanswer'] = answer
+            self.node_content["confidence"] = confidence
         elif node_type == NodeType.REPHASE_QUESTION:
             assert question is not None, "Rephrased question must be provided for REPHASE_QUESTION nodes."
             self.node_content["subquestion"] = question
@@ -135,7 +141,7 @@ class ReasoningNode(Node):
                 # If the previous node is a SUBQUESTION, replace the subanswer with the resubanswer
                 reasoning_trace[-1] = step_content
             elif node.node_type == NodeType.DIRECT_ANSWER:
-                reasoning_trace.append(node.node_content["reasoning"])
+                reasoning_trace.append(f"{node.node_content['user_question']}\n {node.node_content['direct_answer']}")
         trace = ""
         for i, step in enumerate(reasoning_trace):
             trace += f"Step {i+1}: {step}\n"
@@ -153,7 +159,18 @@ class ReasoningNode(Node):
             str: A string representation of the retrieved supporting information.
         """
         try:
-            retrieved_documents = self.retriever.search(query, instruction=instruction, top_k=top_k)['retrieved_docs']
+            retrieval_queries = self.generator.generate_queries(question=query)
+            if retrieval_queries['answerable_main_question'] or len(retrieval_queries['queries']) <= 1:
+                retrieval_queries = query
+            else:
+                retrieval_queries = retrieval_queries['queries']
+        except:
+            retrieval_queries = query  # If query generation fails, use the original query
+        try:
+            retrieved_documents = self.retriever.search(retrieval_queries, instruction=instruction, top_k=top_k)['retrieved_docs']
+            # Flatten the retrieved documents if the query is a list
+            if isinstance(retrieval_queries, list):
+                retrieved_documents = sum(retrieved_documents, [])
         except:
             print(f"Error retrieving documents for query: {query}")
             return ""
@@ -173,7 +190,7 @@ class ReasoningNode(Node):
         information = "\n".join(information)
         return information
     
-    def generate_direct_answer_node(self):
+    def generate_direct_answer_node(self) -> List["ReasoningNode"]:
         """
         Generate a direct answer node from the current node.
         Returns:
@@ -192,7 +209,7 @@ class ReasoningNode(Node):
         context = f"\t**Reasoning trace** \n{reasoning_trace}\n\t**Supporting information** \n{supporting_information}"
         output = self.generator.generate_direct_answer(question=user_question, context=context)
         nodes = []
-        for answer, reasoning in zip(output['answer'], output['reasoning']):
+        for answer, reasoning, confidence in zip(output['answer'], output['reasoning'], output['confidence']):
             node = ReasoningNode(
                 parent=self,
                 node_type=NodeType.DIRECT_ANSWER,
@@ -200,6 +217,7 @@ class ReasoningNode(Node):
                 generator=self.generator,
                 retriever=self.retriever,
                 question=user_question,
+                confidence=confidence,
                 answer=answer,
                 reasoning=reasoning,
                 **self.node_config  # Pass the node configuration to the new node
@@ -219,7 +237,15 @@ class ReasoningNode(Node):
         reasoning_trace = self.get_reasoning_trace()
         output = self.generator.generate_follow_up_reasoning(question=user_question, context=reasoning_trace)
         nodes = []
-        for next_step in output['next_step']:
+        if output['main_question_answerable']:
+            # If the question is answerable, generate a direct answer node
+            return self.generate_direct_answer_node()
+        for next_step, confidence, need_answer in zip(output['next_step'], output['confidence'], output['need_answer']):
+            if need_answer:
+                supporting_information = self.get_supporting_information(query=next_step, instruction="query: ", main_query=user_question)
+                reasoning_output = self.generator.generate_direct_answer(question=next_step, context=supporting_information, n=1)
+                confidence = (reasoning_output['confidence'][0] + confidence) / 2.0  # Average the confidence scores
+                next_step = f"{next_step}\n{reasoning_output['answer'][0]}"
             node = ReasoningNode(
                 parent=self,
                 node_type=NodeType.REASONING,
@@ -227,6 +253,7 @@ class ReasoningNode(Node):
                 generator=self.generator,
                 retriever=self.retriever,
                 reasoning=next_step,
+                confidence=confidence,
                 **self.node_config  # Pass the node configuration to the new node
             )
             nodes.append(node)
@@ -243,22 +270,20 @@ class ReasoningNode(Node):
             question = self.node_content["subquestion"] 
             supporting_information = self.get_supporting_information(query=question, instruction="query: ")
             output = self.generator.generate_direct_answer(question=question, context=supporting_information)
-            answers = output['answer']
-            nodes = []
-            for answer in answers:
-                node = ReasoningNode(
-                    parent=self,
-                    node_type=NodeType.SUBQUESTION,
-                    depth=self.depth + 1,
-                    generator=self.generator,
-                    retriever=self.retriever,
-                    question=question,
-                    answer=answer,
-                    reasoning=None,  # Subquestions do not have reasoning content
-                    **self.node_config  # Pass the node configuration to the new node
-                )
-                nodes.append(node)
-            return nodes
+            highest_confidence_index = output['confidence'].index(max(output['confidence']))
+            highest_confidence_node = ReasoningNode(
+                parent=self,
+                node_type=NodeType.SUBQUESTION,
+                depth=self.depth + 1,
+                generator=self.generator,
+                retriever=self.retriever,
+                question=question,
+                answer=output['answer'][highest_confidence_index],
+                confidence=output['confidence'][highest_confidence_index],
+                reasoning=None,  # Subquestions do not have reasoning content
+                **self.node_config  # Pass the node configuration to the new node
+            )
+            return [highest_confidence_node] 
         else:
             path = self.get_path()
             user_question = path[0].node_content["user_question"]
@@ -269,23 +294,25 @@ class ReasoningNode(Node):
                 # If the main question is answerable, generate a direct answer node
                 return self.generate_direct_answer_node()
             else:
+                nodes = []
                 for subquestion in output['subquestion']:
                     supporting_information = self.get_supporting_information(query=subquestion, instruction="query: ")
                     output = self.generator.generate_direct_answer(question=subquestion, context=supporting_information)
-                    nodes = []
-                    for answer in output['answer']:
-                        node = ReasoningNode(
-                            parent=self,
-                            node_type=NodeType.SUBQUESTION,
-                            depth=self.depth + 1,
-                            generator=self.generator,
-                            retriever=self.retriever,
-                            question=subquestion,
-                            answer=answer,
-                            reasoning=None,  # Subquestions do not have reasoning content
-                            **self.node_config  # Pass the node configuration to the new node
-                        )
-                        nodes.append(node)
+                    highest_confidence = max(output['confidence'])
+                    highest_confidence_index = output['confidence'].index(highest_confidence)
+                    node = ReasoningNode(
+                        parent=self,
+                        node_type=NodeType.SUBQUESTION,
+                        depth=self.depth + 1,
+                        generator=self.generator,
+                        retriever=self.retriever,
+                        question=subquestion,
+                        answer=output['answer'][highest_confidence_index],
+                        confidence=highest_confidence,
+                        reasoning=None,  # Subquestions do not have reasoning content
+                        **self.node_config  # Pass the node configuration to the new node
+                    )
+                    nodes.append(node)
                 return nodes
 
     def generate_resubquestion_node(self):
@@ -300,10 +327,9 @@ class ReasoningNode(Node):
         retriever_query = f"{question}\n{answer}"
         
         supporting_information = self.get_supporting_information(query=retriever_query, instruction="query: ")
-        output = self.generator.reanswer_subquestion(question=question, answer=answer, context=supporting_information)
-        answers = output['reanswered_subquestion']       
+        output = self.generator.reanswer_subquestion(question=question, answer=answer, context=supporting_information)  
         nodes = []
-        for answer in answers:
+        for answer, confidence in zip(output['reanswered_subquestion'], output['confidence']):
             node = ReasoningNode(
                 parent=self,
                 node_type=NodeType.RESUBQUESTION,
@@ -312,6 +338,7 @@ class ReasoningNode(Node):
                 retriever=self.retriever,
                 question=question,
                 answer=answer,
+                confidence=confidence,
                 reasoning=None,  # Resubquestions do not have reasoning content
                 **self.node_config  # Pass the node configuration to the new node
             )
@@ -330,7 +357,7 @@ class ReasoningNode(Node):
             question = self.node_content["user_question"]
         else:
             question = self.node_content["subquestion"]
-        output = self.generator.rephase_question(question=question, context=reasoning_trace)
+        output = self.generator.rephase_question(question=question)
         nodes = []
         for rephrased_question in output['rephrased_question']:
             node = ReasoningNode(
@@ -420,27 +447,46 @@ class ReasoningNode(Node):
         if self.is_valid_leaf():
             if self.node_type == NodeType.DIRECT_ANSWER:
                 answer = self.node_content["direct_answer"]
-                reasoning = self.node_content["reasoning"]
             elif self.node_type == NodeType.SUBQUESTION:
                 answer = self.node_content["subanswer"]
-                reasoning = ""
+            reasoning = self.get_reasoning_trace()
             user_question = self.node_config['user_question']
-            if 'golden_answer' in self.node_config:
-                print(f"Evaluating question: {user_question}, answer: {answer}, golden_answer: {self.node_config['golden_answer']}")       
-                golden_answer = self.node_config['golden_answer']
-                output = self.generator.evaluate_answer(question=user_question, correct_answer=golden_answer, predicted_answer=answer)
-                reward = output['confidence']
-            else:
-                print(f"Evaluating question: {user_question}, answer: {answer}, golden_answer: None")
-                query = f"{user_question}\n{answer}, {reasoning}" if reasoning else f"{user_question}\n{answer}"
-                supporting_information_for_qa = self.get_supporting_information(query=query, instruction="query: ")
-                supporting_information_for_q = self.get_supporting_information(query=user_question, instruction="query: ")
-                supporting_information = f"\t**Retrieved information for question and answer**\n{supporting_information_for_qa}\n\t**Retrieved information for question**\n{supporting_information_for_q}"
-                output = self.generator.score_answer(question=user_question, answer=answer, context=supporting_information)
-                reward = output['score']
+            golden_answer = self.node_config.get('golden_answer', "Not provided")
+            path = self.get_path()
+            answer_confidence = self.node_content['confidence']
         else:
-            # If the node is not a valid leaf, return a reward of 0
-            reward = 0.0
+            # If the node is not a valid leaf, do generate direct answer and evaluate it
+            direct_answer_child = self.generate_direct_answer_node()[0]
+            answer = direct_answer_child.node_content["direct_answer"]
+            reasoning = direct_answer_child.get_reasoning_trace()
+            user_question = direct_answer_child.node_config['user_question']
+            golden_answer = direct_answer_child.node_config.get('golden_answer', "Not provided")
+            path = direct_answer_child.get_path()
+            answer_confidence = direct_answer_child.node_content['confidence']
+        
+        # Answer side scoring
+        if golden_answer != "Not provided":                
+            output = self.generator.evaluate_answer(question=user_question, correct_answer=golden_answer, predicted_answer=answer)
+            reward = output['confidence'] + output['result'] + answer_confidence
+            reward = reward / 3.0 # Normalize the reward to be between 0 and 1
+        else:
+            query = f"{user_question}\n{answer}"
+            supporting_information_for_qa = self.get_supporting_information(query=query, instruction="query: ")
+            supporting_information_for_q = self.get_supporting_information(query=user_question, instruction="query: ")
+            supporting_information = f"\t**Retrieved information for question and answer**\n{supporting_information_for_qa}\n\t**Retrieved information for question**\n{supporting_information_for_q}"
+            output = self.generator.score_answer(question=user_question, answer=answer, context=supporting_information)
+            reward = output['score'] + answer_confidence
+            reward = reward / 2.0  # Normalize the reward to be between 0 and 1
+        # Path confidence scoring
+        path_confidence = [node.node_content['confidence'] for node in path if node.node_content['confidence'] is not None]
+        if path_confidence:
+            path_confidence_score = sum(path_confidence) / len(path_confidence)
+        else:
+            path_confidence_score = 0.0
+        # LLM reasoning scoring
+        reasoning_score = self.generator.score_reasoning(question=user_question, reasoning=reasoning, correct_answer=golden_answer)['score']
+        reasoning_reward = (path_confidence_score + reasoning_score) / 2.0  # Normalize the reasoning reward to be between 0 and 1
+        reward = (reward + reasoning_reward) / 2.0  # Combine the answer and reasoning rewards
         return reward
     
     def find_random_child(self):
@@ -503,7 +549,7 @@ if __name__=='__main__':
     # Example usage
     generator_online_model_kwargs = {
         'model_name': 'qwen3-32b',
-        'url': 'http://n0998.talapas.uoregon.edu:30000/v1',
+        'url': 'http://n0999.talapas.uoregon.edu:30000/v1',
         'api_key': 'None',
         'concurrency': 64,
     }
@@ -520,7 +566,7 @@ if __name__=='__main__':
     generator = Generator(online_model_kwargs=generator_online_model_kwargs, generate_kwargs=generate_kwargs, verbose=True)
 
     retriever_online_kwargs = {
-        "url": "http://n0998.talapas.uoregon.edu:5000/search",
+        "url": "http://n0999.talapas.uoregon.edu:5000/search",
         "retrieval_topk": 5,
         "query_instruction": "query: ",
     }
@@ -539,57 +585,57 @@ if __name__=='__main__':
 
     print("Root node created:")
     root_node.print_node()
-    print("Finding children nodes...")
-    children = root_node.find_children()
-    print(f"Found {len(children)} children nodes:")
-    for child in children:
-        child.print_node()
-    print("Finding random child node...")
-    random_child = root_node.find_random_child()
-    if random_child:
-        print("Random child node found:")
-        random_child.print_node()
-    else:
-        print("No random child node found.")
-    print("Generating direct answer node...")
-    direct_answer_nodes = root_node.generate_direct_answer_node()
-    print(f"Generated {len(direct_answer_nodes)} direct answer nodes:")
-    for node in direct_answer_nodes:
-        node.print_node()
-    print("Generating reasoning node...")
-    reasoning_nodes = root_node.generate_reasoning_node()
-    print(f"Generated {len(reasoning_nodes)} reasoning nodes:")
-    for node in reasoning_nodes:
-        node.print_node()
+    # print("Finding children nodes...")
+    # children = root_node.find_children()
+    # print(f"Found {len(children)} children nodes:")
+    # for child in children:
+    #     child.print_node()
+    # print("Finding random child node...")
+    # random_child = root_node.find_random_child()
+    # if random_child:
+    #     print("Random child node found:")
+    #     random_child.print_node()
+    # else:
+    #     print("No random child node found.")
+    # print("Generating direct answer node...")
+    # direct_answer_nodes = root_node.generate_direct_answer_node()
+    # print(f"Generated {len(direct_answer_nodes)} direct answer nodes:")
+    # for node in direct_answer_nodes:
+    #     node.print_node()
+    # print("Generating reasoning node...")
+    # reasoning_nodes = root_node.generate_reasoning_node()
+    # print(f"Generated {len(reasoning_nodes)} reasoning nodes:")
+    # for node in reasoning_nodes:
+    #     node.print_node()
     print("Generating subquestion node...")
     subquestion_nodes = root_node.generate_subquestion_node()
     print(f"Generated {len(subquestion_nodes)} subquestion nodes:")
     for node in subquestion_nodes:
         node.print_node()
-    print("Generating resubquestion node...")
-    resubquestion_nodes = subquestion_nodes[0].generate_resubquestion_node()  # Generate resubquestion from the first subquestion node
-    print(f"Generated {len(resubquestion_nodes)} resubquestion nodes:")
-    for node in resubquestion_nodes:
-        node.print_node()
-    print("Generating rephrase question node...")
-    rephrase_question_nodes = root_node.generate_rephrase_question_node()
-    print(f"Generated {len(rephrase_question_nodes)} rephrase question nodes:")
-    for node in rephrase_question_nodes:
-        node.print_node()
-    print("Finding children nodes again...")
-    children = root_node.find_children()
-    print(f"Found {len(children)} children nodes after generating all types:")
-    for child in children:
-        child.print_node()
-    print("Checking if the root node is terminal...")
-    is_terminal = root_node.is_terminal()
-    print(f"Is the root node terminal? {is_terminal}")
-    print("Checking if the root node is a valid leaf...")
-    is_valid_leaf = root_node.is_valid_leaf()
-    print(f"Is the root node a valid leaf? {is_valid_leaf}")
-    print("Calculating reward for the root node...")
-    reward = root_node.reward()
-    print(f"Reward for the root node: {reward}")        
+    # print("Generating resubquestion node...")
+    # resubquestion_nodes = subquestion_nodes[0].generate_resubquestion_node()  # Generate resubquestion from the first subquestion node
+    # print(f"Generated {len(resubquestion_nodes)} resubquestion nodes:")
+    # for node in resubquestion_nodes:
+    #     node.print_node()
+    # print("Generating rephrase question node...")
+    # rephrase_question_nodes = root_node.generate_rephrase_question_node()
+    # print(f"Generated {len(rephrase_question_nodes)} rephrase question nodes:")
+    # for node in rephrase_question_nodes:
+    #     node.print_node()
+    # print("Finding children nodes again...")
+    # children = root_node.find_children()
+    # print(f"Found {len(children)} children nodes after generating all types:")
+    # for child in children:
+    #     child.print_node()
+    # print("Checking if the root node is terminal...")
+    # is_terminal = root_node.is_terminal()
+    # print(f"Is the root node terminal? {is_terminal}")
+    # print("Checking if the root node is a valid leaf...")
+    # is_valid_leaf = root_node.is_valid_leaf()
+    # print(f"Is the root node a valid leaf? {is_valid_leaf}")
+    # print("Calculating reward for the root node...")
+    # reward = root_node.reward()
+    # print(f"Reward for the root node: {reward}")        
 
 
 

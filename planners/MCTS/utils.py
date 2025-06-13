@@ -28,7 +28,7 @@ def find_valid_solution_nodes(node: ReasoningNode) -> list[ReasoningNode]:
     return valid_nodes
 
 
-def find_best_solution(root_node: ReasoningNode, use_golden_answer: bool = False, verbose: bool = True):
+def find_best_solution(root_node: ReasoningNode, verbose: bool = True):
     """
     Find the best solution node in the reasoning tree.
     The best solution node is the one with the highest score.
@@ -47,21 +47,8 @@ def find_best_solution(root_node: ReasoningNode, use_golden_answer: bool = False
             answer = node.node_content["subanswer"]
         reasoning_trace = node.get_reasoning_trace()
         user_question = node.node_config['user_question']
-        if 'golden_answer' in node.node_config and use_golden_answer:       
-            golden_answer = node.node_config['golden_answer']
-            output = node.generator.evaluate_answer(question=user_question, correct_answer=golden_answer, predicted_answer=answer)
-            score = output['confidence']
-            node.node_content['golden_answer'] = golden_answer
-            node.node_content['score'] = score
-        else:
-            query = f"{user_question}\n{answer}, {reasoning_trace}" if reasoning_trace else f"{user_question}\n{answer}"
-            supporting_information_for_qa = node.get_supporting_information(query=query, instruction="query: ")
-            supporting_information_for_q = node.get_supporting_information(query=user_question, instruction="query: ")
-            supporting_information = f"\t**Retrieved information for question and answer**\n{supporting_information_for_qa}\n\t**Retrieved information for question**\n{supporting_information_for_q}"
-            output = node.generator.score_answer(question=user_question, answer=answer, context=supporting_information)
-            score = output['score']
-            node.node_content['score'] = score
-        if score > highest_score:
+        score = node.reward()
+        if score >= highest_score:
             highest_score = score
             best_solution = {
                 'question': user_question,
@@ -113,7 +100,7 @@ def search(
     solutions = []
     for i in tqdm.tqdm(range(num_rollouts), desc="MCTS Rollouts"):
         mcts_searcher.do_rollout(root_node)
-        best_solution, solution_scores  = find_best_solution(root_node, use_golden_answer=use_golden_answer)
+        best_solution, solution_scores  = find_best_solution(root_node)
         if best_solution is not None:
             best_solution['rollout_index'] = i  # Add the rollout index to the solution
             solutions.append(best_solution)
@@ -121,7 +108,7 @@ def search(
             print(f"  Question: {best_solution['question']}")
             print(f"  Answer: {best_solution['answer']}")
             print(f"  Score: {best_solution['score']}")
-            print(f"  Reasoning Trace: {best_solution['reasoning_trace']}")
+            print(f"  Reasoning Trace: \n{best_solution['reasoning_trace']}")
     
     if save_tree:
         # Save all nodes of the tree from the root node with BFS traversal
@@ -156,7 +143,7 @@ if __name__ == "__main__":
     # Example usage
     generator_online_model_kwargs = {
         'model_name': 'qwen3-32b',
-        'url': 'http://n0998.talapas.uoregon.edu:30000/v1',
+        'url': 'http://n0999.talapas.uoregon.edu:30000/v1',
         'api_key': 'None',
         'concurrency': 64,
     }
@@ -173,7 +160,7 @@ if __name__ == "__main__":
     generator = Generator(online_model_kwargs=generator_online_model_kwargs, generate_kwargs=generate_kwargs, verbose=False, use_cache=True, cache_dir="cache/llm_agents")
 
     retriever_online_kwargs = {
-        "url": "http://n0998.talapas.uoregon.edu:5000/search",
+        "url": "http://n0999.talapas.uoregon.edu:5000/search",
         "retrieval_topk": 5,
         "query_instruction": "query: ",
     }
@@ -187,7 +174,7 @@ if __name__ == "__main__":
         question=question,
         question_id="example_question",
         golden_answer=["No"],
-        max_depth=4,
+        max_depth=15,
         refine_retrieved_docs=True,
         # MCTS parameters
         exploration_weight= 1.0,

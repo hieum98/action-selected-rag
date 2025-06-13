@@ -8,6 +8,7 @@ from prompts import (
     generate_subquestion_and_answer,
     reanswer_subquestion,
     rephase_question,
+    generate_query,
 )
 
 
@@ -70,6 +71,12 @@ class Generator:
         self.evaluate_answer_given_context_prompt = evaluate.EVALUATE_ANSWER_GIVEN_CONTEXT_PROMPT
         self.evaluate_answer_given_context_examples = None
 
+        self.score_reasoning_prompt = evaluate.EVALUATE_REASONING_PROMPT
+        self.score_reasoning_examples = None
+
+        self.generate_queries_prompt = generate_query.GENERATE_QUERIES_PROMPT
+        self.generate_queries_examples = None
+
     def evaluate_answer(self, question: str, correct_answer: Union[str, List[str]], predicted_answer: str):
         """
         Evaluates the quality of a predicted answer against a correct answer.
@@ -102,6 +109,7 @@ class Generator:
         if self.verbose:
             print(f"Time taken to evaluate answer: {time.time() - start_time:.2f} seconds")
         results = []
+        confidence = []
         reasoning = []
         for response in responses:
             response_object = response.get('output', None)
@@ -109,15 +117,24 @@ class Generator:
                 if isinstance(response_object, evaluate.EvaluateAnswerOutput):
                     # Normalize the decision to lowercase for consistency
                     answer_status = response_object.decision
+                    answer_confidence = response_object.confidence
+                    answer_confidence = answer_confidence.lower() if confidence else None
+                    if answer_confidence == 'high':
+                        confidence.append(1)
+                    elif answer_confidence == 'medium':
+                        confidence.append(0.5)
+                    else:
+                        confidence.append(0)
                     results.append(answer_status)
                     reasoning.append(response_object.reasoning)
                 else:
                     print(f"Warning: Response object is not of type EvaluateAnswerOutput: {response_object}")
         # Majority voting for the results
         if len(results) > 0:
-            confidence = sum(results) / len(results)  # Calculate the confidence level
-            assert 0 <= confidence <= 1, "Confidence should be between 0 and 1"
-            final_result = confidence >= 0.5 # True if more than half of the responses are 'matched'
+            final_result = sum(results) / len(results)  # Calculate the confidence level
+            assert 0 <= final_result <= 1, "final_result should be between 0 and 1"
+            final_result = final_result >= 0.5 # True if more than half of the responses are 'matched'
+            confidence = sum(confidence) / len(confidence) if confidence else 0.0  # Average confidence
         else:
             # Print out to help debug the issue
             print(f"Warning: No valid responses received for evaluation")
@@ -139,7 +156,7 @@ class Generator:
             'confidence': confidence,  # float: Confidence level of the evaluation result
         }
     
-    def generate_direct_answer(self, question: str, context: str=None):
+    def generate_direct_answer(self, question: str, context: str=None, **kwargs):
         """
         Generates a direct answer to a question using the LLM agent.
         
@@ -165,30 +182,43 @@ class Generator:
             'index': 0
         }
         start_time = time.time()
-        responses = self.llm_agent.generate(agent_input)['output']
+        responses = self.llm_agent.generate(agent_input, **kwargs)['output']
         if self.verbose:
             print(f"Time taken to generate direct answer: {time.time() - start_time:.2f} seconds")
         answers = []
         reasoning = []
         additional_information = []
+        confidence = []
         for response in responses:
             response_object = response.get('output', None)
-            cot_reasoning = response.get('cot_reasoning', None)
             if response_object is not None:
                 if isinstance(response_object, generate_direct_answer.DirectAnswerOutput):
+                    if self.verbose:
+                        print(f"Response object: {response_object}")
                     answers.append(response_object.answer)
                     reasoning.append(response_object.reasoning)
                     additional_information.append(response_object.additional_information)
+                    answer_confidence = response_object.confidence.lower() if response_object.confidence else None
+                    if answer_confidence == 'high':
+                        confidence.append(1)
+                    elif answer_confidence == 'medium':
+                        confidence.append(0.5)
+                    else:
+                        confidence.append(0)
                 else:
                     print(f"Warning: Response object is not of type DirectAnswerOutput: {response_object}")
         if self.verbose:
             print(f"Generated answers: {answers}")
             print(f"Reasoning: {reasoning}")
             print(f"Additional information: {additional_information}")
+            print(f"Confidence: {confidence}")
+
+        assert len(answers) == len(reasoning) == len(confidence), "Answers, reasoning, and confidence lists must be of the same length."
         return {
             'answer': answers, # [str] 
             'reasoning': reasoning,
-            'additional_information': additional_information
+            'additional_information': additional_information,
+            'confidence': confidence  
         }    
 
     def generate_follow_up_reasoning(self, question: str, context: str=None):
@@ -220,21 +250,43 @@ class Generator:
             print(f"Time taken to generate next step: {time.time() - start_time:.2f} seconds")
         next_steps = []
         justifications = []
+        answerable_main_question = []
+        confidence = []
+        reasoning_types = []
         for response in responses:
             response_object = response.get('output', None)
-            cot_reasoning = response.get('cot_reasoning', None)
             if response_object is not None:
                 if isinstance(response_object, generate_one_next_step.OneNextStepOutput):
+                    if self.verbose:
+                        print(f"Response object: {response_object}")
+                    answerable_main_question.append(response_object.answerable_main_question)
                     next_steps.append(response_object.next_step)
                     justifications.append(response_object.justification)
+                    answer_confidence = response_object.confidence.lower() if response_object.confidence else None
+                    reasoning_types.append(response_object.inference_type.lower() != 'logical')
+                    if answer_confidence == 'high':
+                        confidence.append(1)
+                    elif answer_confidence == 'medium':
+                        confidence.append(0.5)
+                    else:
+                        confidence.append(0)
                 else:
                     print(f"Warning: Response object is not of type OneNextStepOutput: {response_object}")
         if self.verbose:
             print(f"Generated next steps: {next_steps}")
             print(f"Justifications: {justifications}")
+            print(f"Main question answerable: {answerable_main_question}")
+            print(f"Confidence: {confidence}")
+            print(f"Reasoning types: {reasoning_types}")
+        # Majority voting for the main question answerability
+        question_answerable = sum(answerable_main_question) / len(answerable_main_question) >= 0.5 if answerable_main_question else False
+        assert len(next_steps) == len(answerable_main_question) == len(justifications), "Next steps, justifications, and answerable main question lists must be of the same length."
         return {
             'next_step': next_steps,  # [str]
-            'justification': justifications
+            'justification': justifications,
+            'main_question_answerable': question_answerable,
+            'confidence': confidence,  # [float] Confidence level of the next step, between 0 and 1
+            'need_answer': reasoning_types  
         }
     
     def generate_subquestion(self, question: str, context: str=None):
@@ -269,13 +321,17 @@ class Generator:
         subquestions = []
         reasoning = []
         main_question_answerable = []
+        gap_type = []
         for response in responses:
             response_object = response.get('output', None)
             if response_object is not None:
                 if isinstance(response_object, generate_subquestion_and_answer.SubquestionOutput):
+                    if self.verbose:
+                        print(f"Response object: {response_object}")
                     subquestions.append(response_object.subquestion)
                     main_question_answerable.append(response_object.answerable_main_question)
                     reasoning.append(response_object.reasoning)
+                    gap_type.append(response_object.gap_type)
                 else:
                     print(f"Warning: Response object is not of type SubquestionOutput: {response_object}")
         # Majority voting for the main question answerability
@@ -286,10 +342,12 @@ class Generator:
             print(f"Main question answerability: {main_question_answerable}")
             print(f"Main question answerable: {final_answerable}")
             print(f"Reasoning: {reasoning}")
+            print(f"Gap types: {gap_type}")
         return {
             'subquestion': subquestions,  # [str]
             'main_question_answerable': final_answerable,  # bool
-            'reasoning': reasoning
+            'reasoning': reasoning,
+            'gap_type': gap_type  # [str] Type of reasoning gap identified, one of 'factual', 'relational', 'causal', 'temporal', 'logical', or 'null'
         }
 
     def generate_subquestion_and_answer(self, question: str, context: str=None):
@@ -324,23 +382,35 @@ class Generator:
         subquestions = []
         answers = []
         reasoning = []
+        confidence = []
         for response in responses:
             response_object = response.get('output', None)
             if response_object is not None:
                 if isinstance(response_object, generate_subquestion_and_answer.SubquestionAndAnswerOutput):
+                    if self.verbose:
+                        print(f"Response object: {response_object}")
                     subquestions.append(response_object.subquestion)
                     answers.append(response_object.answer)
                     reasoning.append(response_object.reasoning)
+                    answer_confidence = response_object.confidence.lower() if response_object.confidence else None
+                    if answer_confidence == 'high':
+                        confidence.append(1)
+                    elif answer_confidence == 'medium':
+                        confidence.append(0.5)
+                    else:
+                        confidence.append(0)
                 else:
                     print(f"Warning: Response object is not of type SubquestionAndAnswerOutput: {response_object}")
         if self.verbose:
             print(f"Generated subquestions: {subquestions}")
             print(f"Generated answers: {answers}")
             print(f"Reasoning: {reasoning}")
+            print(f"Confidence: {confidence}")
         return {
             'subquestion': subquestions,  # [str]
             'answer': answers,  # [str]
-            'reasoning': reasoning
+            'reasoning': reasoning,
+            'confidence': confidence  # [float] Confidence level of the generated answer, between 0 and 1
         }
 
     def reanswer_subquestion(self, question: str, answer: str, context: str=None):
@@ -374,29 +444,40 @@ class Generator:
             print(f"Time taken to reanswer subquestion: {time.time() - start_time:.2f} seconds")
         reanswered_subquestions = []
         reasoning = []
+        confidence = []
         for response in responses:
             response_object = response.get('output', None)
             if response_object is not None:
                 if isinstance(response_object, reanswer_subquestion.ReanswerOutput):
+                    if self.verbose:
+                        print(f"Response object: {response_object}")
                     reanswered_subquestions.append(response_object.reanswer)
                     reasoning.append(response_object.reasoning)
+                    answer_confidence = response_object.confidence.lower() if response_object.confidence else None
+                    if answer_confidence == 'high':
+                        confidence.append(1)
+                    elif answer_confidence == 'medium':
+                        confidence.append(0.5)
+                    else:
+                        confidence.append(0)
                 else:
                     print(f"Warning: Response object is not of type ReanswerOutput: {response_object}")
         if self.verbose:
             print(f"Reanswered subquestions: {reanswered_subquestions}")
             print(f"Reasoning: {reasoning}")
+            print(f"Confidence: {confidence}")
         return {
             'reanswered_subquestion': reanswered_subquestions,  # [str]
-            'reasoning': reasoning
+            'reasoning': reasoning,
+            'confidence': confidence  # [float] Confidence level of the reanswered subquestion, between 0 and 1
         }
 
-    def rephase_question(self, question: str, context: str=None):
+    def rephase_question(self, question: str):
         """
         Rephrases a question to make it clearer, more specific, or more focused while retaining its original intent.
         
         Args:
             question (str): The question to be rephrased.
-            context (str, optional): Additional context to inform the rephrasing process.
         
         Returns:
             dict: A dictionary containing the rephrased question and reasoning.
@@ -404,7 +485,6 @@ class Generator:
         user_message = self.rephase_question_prompt.format(
             examples=self.rephase_question_examples if self.rephase_question_examples else "",
             question=question, 
-            context=context if context else ""
             )
         messages = [{'role': 'user', 'content': user_message}]
         if self.verbose:
@@ -425,6 +505,8 @@ class Generator:
             response_object = response.get('output', None)
             if response_object is not None:
                 if isinstance(response_object, rephase_question.RephraseQuestionOutput):
+                    if self.verbose:
+                        print(f"Response object: {response_object}")
                     rephrased_questions.append(response_object.rephrased_question)
                     reasoning.append(response_object.reasoning)
                 else:
@@ -436,9 +518,143 @@ class Generator:
             'rephrased_question': rephrased_questions,  # [str]
             'reasoning': reasoning
         }
+    
+    def generate_queries(self, question: str, context: str=None):
+        """
+        Generates strategic queries to complement the context for answering the main question.
         
-    def score_reasoning():
-        pass
+        Args:
+            question (str): The main question to be answered.
+            context (str, optional): Additional context to inform the query generation.
+        
+        Returns:
+            dict: A dictionary containing the generated queries and reasoning.
+        """
+        user_message = self.generate_queries_prompt.format(
+            examples=self.generate_queries_examples if self.generate_queries_examples else "",
+            question=question, 
+            context=context if context else ""
+            )
+        messages = [{'role': 'user', 'content': user_message}]
+        if self.verbose:
+            print("*"* 10)
+            print(f"Generating queries with user message: {user_message}")
+        agent_input = {
+            'messages': messages,
+            'json_schema': generate_query.QueriesGenerationOutput,
+            'index': 0
+        }
+        start_time = time.time()
+        response = self.llm_agent.generate(agent_input, n=1)['output'][0]
+        if self.verbose:
+            print(f"Time taken to generate queries: {time.time() - start_time:.2f} seconds")
+        response_object = response.get('output', None)
+        if response_object is not None:
+            if isinstance(response_object, generate_query.QueriesGenerationOutput):
+                if self.verbose:
+                    print(f"Response object: {response_object}")
+                queries = response_object.queries
+                reasoning = response_object.reasoning
+                answerable_main_question = response_object.answerable_main_question
+            else:
+                print(f"Warning: Response object is not of type GenerateQueriesOutput: {response_object}")
+        if self.verbose:
+            print(f"Generated queries: {queries}")
+            print(f"Reasoning: {reasoning}")
+        return {
+            'answerable_main_question': answerable_main_question,  # bool: True if the main question can be answered with the provided context, False otherwise
+            'queries': queries,  # [str]
+            'reasoning': reasoning
+        }
+
+    def score_reasoning(self, question: str, reasoning: str, correct_answer: Union[str, List[str]]=None):
+        """
+        Evaluates the quality of reasoning provided for a question, optionally comparing it to a correct answer.
+        
+        Args:
+            question (str): The question being answered.
+            reasoning (str): The reasoning provided for the answer.
+            correct_answer (str or List[str], optional): The correct answer to the question for comparison.
+        
+        Returns:
+            dict: A dictionary containing the evaluation result, reasoning, and additional information.
+        """
+        user_message = self.score_reasoning_prompt.format(
+            examples=self.score_reasoning_examples if self.score_reasoning_examples else "",
+            original_question=question, 
+            reasoning_path=reasoning, 
+            correct_answer=correct_answer if correct_answer else ""
+            )
+        messages = [{'role': 'user', 'content': user_message}]
+        if self.verbose:
+            print("*"* 10)
+            print(f"Scoring reasoning with user message: {user_message}")
+        agent_input = {
+            'messages': messages,
+            'json_schema': evaluate.EvaluateReasoningOutput,
+            'index': 0
+        }
+        start_time = time.time()
+        responses = self.llm_agent.generate(agent_input)['output']
+        if self.verbose:
+            print(f"Time taken to score reasoning: {time.time() - start_time:.2f} seconds")
+        step_qualities = []
+        overall_qualities = []
+        conclusion_qualities = []
+        for response in responses:
+            response_object = response.get('output', None)
+            if response_object is not None:
+                if isinstance(response_object, evaluate.EvaluateReasoningOutput):
+                    if self.verbose:
+                        print(f"Response object: {response_object}")
+                    step_quality = response_object.step_quality.lower() if response_object.step_quality else None
+                    if step_quality == 'excellent':
+                        step_qualities.append(4)
+                    elif step_quality == 'good':
+                        step_qualities.append(3)
+                    elif step_quality == 'fair':
+                        step_qualities.append(2)
+                    elif step_quality == 'poor':
+                        step_qualities.append(1)
+                    else:
+                        step_qualities.append(0)
+                    overall_quality = response_object.overall_quality.lower() if response_object.overall_quality else None
+                    if overall_quality == 'excellent':
+                        overall_qualities.append(4)
+                    elif overall_quality == 'good':
+                        overall_qualities.append(3)
+                    elif overall_quality == 'fair':
+                        overall_qualities.append(2)
+                    elif overall_quality == 'poor':
+                        overall_qualities.append(1)
+                    else:
+                        overall_qualities.append(0)
+                    conclusion_quality = response_object.conclusion_quality.lower() if response_object.conclusion_quality else None
+                    if conclusion_quality == 'excellent':
+                        conclusion_qualities.append(4)
+                    elif conclusion_quality == 'good':
+                        conclusion_qualities.append(3)
+                    elif conclusion_quality == 'fair':
+                        conclusion_qualities.append(2)
+                    elif conclusion_quality == 'poor':
+                        conclusion_qualities.append(1)
+                    else:
+                        conclusion_qualities.append(0)
+        step_quality_score = sum(step_qualities) / len(step_qualities) if step_qualities else 0 # Average score for step quality, between 0 and 4
+        overall_quality_score = sum(overall_qualities) / len(overall_qualities) if overall_qualities else 0 
+        conclusion_quality_score = sum(conclusion_qualities) / len(conclusion_qualities) if conclusion_qualities else 0
+        score = (step_quality_score + overall_quality_score + conclusion_quality_score) / 12.0 # Final score between 0 and 1
+        if self.verbose:
+            print(f"Step quality scores: {step_qualities}")
+            print(f"Overall quality scores: {overall_qualities}")
+            print(f"Conclusion quality scores: {conclusion_qualities}")
+            print(f"Final score: {score:.2f}")
+            print(f"Question: {question}")
+            print(f"Reasoning: {reasoning}")
+            print(f"Correct answer: {correct_answer}")
+        return {
+            'score': score,  # float: Score of the reasoning, between 0 and 1
+            }
 
     def score_answer(self, question: str, answer: str, context: str=None):
         """
@@ -545,10 +761,12 @@ class Generator:
             response_object = response['output'][0].get('output', None)
             if response_object is not None:
                 if isinstance(response_object, evaluate.EvaluateRetrievedDocumentOutput):
+                    if self.verbose:
+                        print(f"Response object: {response_object}")
                     decision = response_object.decision.lower()  # Normalize decision to lowercase
-                    results.append(decision == 'relevant')
+                    results.append(decision != 'not_relevant')
                     reasoning.append(response_object.reasoning)
-                    extracted_information.append(response_object.extracted_information if response_object.decision == 'relevant' else "")
+                    extracted_information.append(response_object.extracted_information if decision != 'not_relevant' else "")
                 else:
                     print(f"Warning: Response object is not of type EvaluateRetrievedDocumentOutput: {response_object}")
         if self.verbose:
@@ -619,7 +837,7 @@ if __name__ == "__main__":
     # Example usage
     online_model_kwargs = {
         'model_name': 'qwen3-32b',
-        'url': 'http://n0998.talapas.uoregon.edu:30000/v1',
+        'url': 'http://n0999.talapas.uoregon.edu:30000/v1',
         'api_key': 'None',
         'concurrency': 64,
     }
@@ -634,34 +852,43 @@ if __name__ == "__main__":
         'tensor_parallel_size': 1,
     }
 
-    genrator = Generator(online_model_kwargs=online_model_kwargs, generate_kwargs=generate_kwargs)
+    genrator = Generator(online_model_kwargs=online_model_kwargs, generate_kwargs=generate_kwargs, verbose=True)
 
-    question = "What are the most effective policies governments can implement to combat climate change?"
-    context = "Climate change is a pressing global issue that requires immediate action. Governments play a crucial role in implementing policies to mitigate its effects. Effective policies include transitioning to renewable energy sources, implementing carbon pricing, promoting energy efficiency, and enhancing public transportation systems. Additionally, reforestation and conservation efforts can significantly reduce carbon emissions. International cooperation is also essential for addressing this global challenge."
-    # direct_answer = genrator.generate_direct_answer(question, context)
+    question = "Are director of film Move (1970 Film) and director of film Méditerranée (1963 Film) from the same country?"
+    context = "The director of the film Move (1970 Film) is John Smith, who is from the United States. The director of the film Méditerranée (1963 Film) is Jean Dupont, who is from France."
+    correct_answer = ["No"]
+    predicted_answer = "No, the directors are from different countries."
+    # Evaluate the answer
+    # evaluation_result = genrator.evaluate_answer(question, correct_answer, predicted_answer)
     # breakpoint()
-    # next_step = genrator.generate_follow_up_reasoning(question)
+    # Generate a direct answer
+    # direct_answer_result = genrator.generate_direct_answer(question, context)
     # breakpoint()
-    # subquestion_and_answer = genrator.generate_subquestion_and_answer(question, context)
+    # Generate a next reasoning step
+    # next_step_result = genrator.generate_follow_up_reasoning(question, context=None)
     # breakpoint()
-    # subquestion_and_answer = genrator.generate_subquestion_and_answer(question)
+    # Generate a subquestion
+    # subquestion_result = genrator.generate_subquestion(question, context=None)
     # breakpoint()
-    # subquestion = "What are the most effective policies governments can implement to combat climate change?"
-    # subanswer = "Governments can implement a variety of effective policies to combat climate change, including transitioning to renewable energy sources, implementing carbon pricing, promoting energy efficiency, and enhancing public transportation systems."
-    # reanswer = genrator.reanswer_subquestion(subquestion, subanswer)
+    # Generate a subquestion and answer
+    # subquestion_and_answer_result = genrator.generate_subquestion_and_answer(question, context)
     # breakpoint()
-    # rephrased_question = genrator.rephase_question(question, context)
+    # Reanswer a subquestion
+    # reanswer_result = genrator.reanswer_subquestion(question, predicted_answer, context)
     # breakpoint()
-    # relevant_docs = [
-    #     "Global warming represents one of the most pressing challenges facing humanity today. Its potential consequences include drastic changes in climate patterns, severe weather events, and impacts on biodiversity and human health. In response, governments around the world have a crucial role to play in addressing these issues. This article seeks to explore the various strategies governments can implement to mitigate the effects of global warming. It will cover a range of approaches, from legislative initiatives to public awareness campaigns, highlighting the importance of collaborative efforts at local, national, and international levels.",
-    #     "Climate change is a pressing global issue that requires immediate action. Governments play a crucial role in implementing policies to mitigate its effects. Effective policies include transitioning to renewable energy sources, implementing carbon pricing, promoting energy efficiency, and enhancing public transportation systems. Additionally, reforestation and conservation efforts can significantly reduce carbon emissions. International cooperation is also essential for addressing this global challenge."
+    # Rephrase a question
+    # rephrase_result = genrator.rephase_question(question)
+    # breakpoint()
+    # documents = [
+    #     "The director of the film Move (1970 Film) is John Smith, who is from the United States. The director of the film Méditerranée (1963 Film) is Jean Dupont, who is from France",
+    #     "John Smith directed Move (1970 Film) and is American. Jean Dupont directed Méditerranée (1963 Film) and is French."
     # ]
-    # irrelevant_docs = [
-    #     "The history of the Roman Empire is a fascinating subject that has captivated historians and enthusiasts alike. From its humble beginnings as a small city-state to its expansion into a vast empire, the Roman Empire has left an indelible mark on world history. This article will explore the key events, figures, and cultural achievements of the Roman Empire, shedding light on its enduring legacy.",
-    #     "The solar system consists of the Sun and all celestial bodies that are bound by gravity to it, including planets, moons, asteroids, comets, and meteoroids. The eight major planets in our solar system are Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune. Each planet has unique characteristics and features that make it distinct."
-    # ]
-    # docs = relevant_docs + irrelevant_docs
-    # current_step_objective = "Identify the most effective policies governments can implement to combat climate change."
-    # retrieved_docs = genrator.extract_information_from_retrieved_docs(question, docs, current_step_objective)
+    # # Evaluate the retrieved documents
+    # retrieved_docs_result = genrator.extract_information_from_retrieved_docs(question, documents, current_step_objective="Determine if the directors are from the same country.")
     # breakpoint()
-
+    # Evaluate if two questions are the same
+    # same_question_result = genrator.evaluate_same_question(question, "Are the directors of Move (1970 Film) and Méditerranée (1963 Film) from the same country?")
+    # breakpoint()
+    # Generate queries to complement the context
+    queries_result = genrator.generate_queries(question, context='')
+    breakpoint()

@@ -329,6 +329,7 @@ class LLMAgent:
                 raise ValueError(f"Unknown agent type: {agent_type}")
         self.use_cache = use_cache
         self.cache_dir = os.path.join(cache_dir, model_name)
+        self.n = self.agent.num_samples
         # Ensure cache directory exists
         os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -379,7 +380,7 @@ class LLMAgent:
             cache_file = f"{self.cache_dir}/{input_hash}.json"
             try:
                 response = self.load_from_cache(cache_file, response_class, input['index'])
-                print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
+                # print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
                 return response
             except:
                 response = self.agent.generate(input, **kwargs)
@@ -407,7 +408,7 @@ class LLMAgent:
                 cache_file = f"{self.cache_dir}/{input_hash}.json"
                 try:
                     cached_response = self.load_from_cache(cache_file, response_object, item['index'])
-                    print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
+                    # print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
                     responses.append(cached_response)
                 except:
                     item['hash'] = input_hash
