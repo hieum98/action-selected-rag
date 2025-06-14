@@ -1,3 +1,4 @@
+import re
 from typing import List, Union
 import time
 from agents.llm_agents import LLMAgent
@@ -215,7 +216,7 @@ class Generator:
         user_message = self.generate_direct_answer_prompt.format(
             examples=self.direct_answer_examples if self.direct_answer_examples else "",
             question=question, 
-            context=context if context else ""
+            context=context if context else "Not provided"
             )
         messages = [{'role': 'user', 'content': user_message}]
         if self.verbose:
@@ -278,7 +279,7 @@ class Generator:
             user_message = self.generate_direct_answer_prompt.format(
                 examples=self.direct_answer_examples if self.direct_answer_examples else "",
                 question=q, 
-                context=c if c else ""
+                context=c if c else "Not provided"
             )
             messages.append([{'role': 'user', 'content': user_message}])
         start_time = time.time()
@@ -334,7 +335,7 @@ class Generator:
         user_message = self.generate_one_next_step_prompt.format(
             examples=self.one_next_step_examples if self.one_next_step_examples else "",
             question=question, 
-            context=context if context else ""
+            context=context if context else "Not provided"
             )
         messages = [{'role': 'user', 'content': user_message}]
         if self.verbose:
@@ -404,7 +405,7 @@ class Generator:
         user_message = self.generate_subquestion_prompt.format(
             examples=self.generate_subquestion_examples if self.generate_subquestion_examples else "",
             question=question, 
-            context=context if context else ""
+            context=context if context else "Not provided"
             )
         messages = [{'role': 'user', 'content': user_message}]
         agent_input = {
@@ -465,7 +466,7 @@ class Generator:
         user_message = self.generate_subquestion_and_answer_prompt.format(
             examples=self.subquestion_and_answer_examples if self.subquestion_and_answer_examples else "",
             question=question, 
-            context=context if context else "",
+            context=context if context else "Not provided",
             )
         messages = [{'role': 'user', 'content': user_message}]
         agent_input = {
@@ -528,7 +529,7 @@ class Generator:
             examples=self.reanswer_subquestion_examples if self.reanswer_subquestion_examples else "",
             question=question, 
             answer=answer, 
-            context=context if context else ""
+            context=context if context else "Not provided"
             )
         messages = [{'role': 'user', 'content': user_message}]
         if self.verbose:
@@ -634,7 +635,7 @@ class Generator:
         user_message = self.generate_queries_prompt.format(
             examples=self.generate_queries_examples if self.generate_queries_examples else "",
             question=question, 
-            context=context if context else ""
+            context=context if context else "Not provided"
             )
         messages = [{'role': 'user', 'content': user_message}]
         if self.verbose:
@@ -656,12 +657,28 @@ class Generator:
                     print(f"Response object: {response_object}")
                 queries = response_object.queries
                 reasoning = response_object.reasoning
-                answerable_main_question = response_object.answerable_main_question
+                answerable_main_question = response_object.decision
             else:
-                print(f"Warning: Response object is not of type GenerateQueriesOutput: {response_object}")
-        if self.verbose:
-            print(f"Generated queries: {queries}")
-            print(f"Reasoning: {reasoning}")
+                if self.verbose:
+                    print(f"Warning: Response object is not of type GenerateQueriesOutput: {response_object}")
+                # Extract "answerable_main_question" with regex 
+                anserable_main_question_match = re.search(r'"decision":\s*(true|false)', response_object)
+                if anserable_main_question_match:
+                    answerable_main_question = anserable_main_question_match.group(1)
+                    if answerable_main_question == "true":
+                        answerable_main_question = True
+                    elif answerable_main_question == "false":
+                        answerable_main_question = False
+                else:
+                    answerable_main_question = False
+                # Extract the queries
+                pattern = r'"queries":\s*\[.*?\],'
+                match = re.search(pattern, response_object, re.DOTALL)
+                query_str = match.group(0)
+                query_str = query_str[len('"queries": '):-2]
+                query_str = query_str.strip('[]')
+                queries = [query.strip().strip('"') for query in query_str.split(',')]
+                reasoning = ""
         return {
             'answerable_main_question': answerable_main_question,  # bool: True if the main question can be answered with the provided context, False otherwise
             'queries': queries,  # [str]
@@ -676,7 +693,7 @@ class Generator:
             user_message = self.generate_queries_prompt.format(
                 examples=self.generate_queries_examples if self.generate_queries_examples else "",
                 question=q, 
-                context=c if c else ""
+                context=c if c else "Not provided"
             )
             messages.append([{'role': 'user', 'content': user_message}])
         start_time = time.time()
@@ -694,12 +711,23 @@ class Generator:
                     print(f"Response object: {response_object}")
                 queries.append(response_object.queries)
                 reasoning.append(response_object.reasoning)
-                answerable_main_question.append(response_object.answerable_main_question)
+                answerable_main_question.append(response_object.decision)
             else:
                 print(f"Warning: Response object is not of type GenerateQueriesOutput: {response_object}")
-                queries.append([])
+                # Extract "answerable_main_question" with regex
+                anserable_main_question_match = re.search(r'"decision":\s*(true|false)', response_object)
+                if anserable_main_question_match:
+                    answerable_main_question.append(anserable_main_question_match.group(1) == "true")
+                else:
+                    answerable_main_question.append(False)
+                # Extract the queries
+                pattern = r'"queries":\s*\[.*?\],'
+                match = re.search(pattern, response_object, re.DOTALL)
+                query_str = match.group(0)
+                query_str = query_str[len('"queries": '):-2]
+                query_str = query_str.strip('[]')
+                queries.append([query.strip().strip('"') for query in query_str.split(',')])
                 reasoning.append("")
-                answerable_main_question.append(False)
         return {
             'answerable_main_question': answerable_main_question,  # [bool] True if the main question can be answered with the provided context, False otherwise
             'queries': queries,  # List[List[str]]: List of queries generated for each question
@@ -811,7 +839,7 @@ class Generator:
             examples=self.evaluate_answer_given_context_examples if self.evaluate_answer_given_context_examples else "",
             question=question, 
             answer=answer, 
-            context=context if context else ""
+            context=context if context else "Not provided"
             )
         messages = [{'role': 'user', 'content': user_message}]
         if self.verbose:
@@ -1013,6 +1041,7 @@ if __name__ == "__main__":
         "John Smith directed Move (1970 Film).",
         "Jean Dupont directed Méditerranée (1963 Film)."
     ]
+    breakpoint()
     queries = genrator.batch_generate_queries(batch_questions)
     breakpoint()
     direct_answers = genrator.batch_generate_direct_answer(batch_questions)

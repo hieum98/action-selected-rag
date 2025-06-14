@@ -266,9 +266,11 @@ class ReasoningNode(Node):
             List[ReasoningNode]: A new node of type SUBQUESTION with the generated subquestion and answer.
         """
         assert self.node_type != NodeType.DIRECT_ANSWER, "Subquestion nodes cannot be generated from DIRECT_ANSWER nodes."
+        path = self.get_path()
+        user_question = path[0].node_content["user_question"]
         if self.node_type == NodeType.REPHASE_QUESTION:
             question = self.node_content["subquestion"] 
-            supporting_information = self.get_supporting_information(query=question, instruction="query: ")
+            supporting_information = self.get_supporting_information(query=question, instruction="query: ", main_query=user_question)
             output = self.generator.generate_direct_answer(question=question, context=supporting_information)
             highest_confidence_index = output['confidence'].index(max(output['confidence']))
             highest_confidence_node = ReasoningNode(
@@ -285,8 +287,6 @@ class ReasoningNode(Node):
             )
             return [highest_confidence_node] 
         else:
-            path = self.get_path()
-            user_question = path[0].node_content["user_question"]
             reasoning_trace = self.get_reasoning_trace()
             output = self.generator.generate_subquestion(question=user_question, context=reasoning_trace)
             main_question_answerable = output['main_question_answerable']
@@ -296,7 +296,7 @@ class ReasoningNode(Node):
             else:
                 nodes = []
                 for subquestion in output['subquestion']:
-                    supporting_information = self.get_supporting_information(query=subquestion, instruction="query: ")
+                    supporting_information = self.get_supporting_information(query=subquestion, instruction="query: ", main_query=user_question)
                     output = self.generator.generate_direct_answer(question=subquestion, context=supporting_information)
                     highest_confidence = max(output['confidence'])
                     highest_confidence_index = output['confidence'].index(highest_confidence)
