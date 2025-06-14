@@ -33,31 +33,23 @@ class EvaluateAnswerOutput(pydantic.BaseModel):
     )
 
 
-EVALUATE_RETRIEVED_DOCUMENT_PROMPT = """You are an expert assistant specializing in evaluating the relevance of a retrieved document to a given question and the current step's objective/ subquestions. For each task, you will receive a question, the current step's objective, and a document to evaluate. Your goal is to determine whether the document is relevant to the question or the current step's objective.
+EVALUATE_RETRIEVED_DOCUMENT_PROMPT = """You are an expert assistant specializing in evaluating the relevance of a retrieved document to a given question and the current step's objective/ subquestions. For each task, you will receive a question, the current step's objective, and a document to evaluate. Your goal is to determine the document's relevance and extract all pertinent information, including direct answers, context, supporting evidence, and related concepts.
 
 Instructions:
 1. **Question and Objective Analysis:** Carefully read and understand the question and the current step's objective. Identify key components and clarify what is being asked.
-2. **Document Relevance Evaluation:** Analyze the document to determine whether it provides relevant information to answer the question or the current's step's objective. Note that the relevance document may not directly answer the question or the current step's objective, but it should provide useful information that can help answer the question or the current step's objective.
-3. **Thought Process**: Provide a brief analysis for each document, considering both the answer content and the current objectives.
-4. **Comprehensive Information Extraction:** If the document is relevant, extract ALL useful information using the following structured approach:
-   - **Direct Answers:** Information that directly addresses the question or objective
-   - **Supporting Evidence:** Context, background, or related facts that strengthen understanding
-   - **Partial Information:** Incomplete but relevant details that could be combined with other sources
-   - **Contradictory Information:** Any information that challenges assumptions or provides alternative perspectives
-5. **Information Formatting:** Present extracted information as a coherent paragraph with bullet points. For each point, include:
-   - The key information summary
-   - The exact original text in quotation marks as evidence
-   - Brief explanation of relevance and confidence level
-6. **Output Format:** Respond in the following JSON structure with the following fields:
-- "decision": "<'relevant' if the document is relevant to the question and the current step's objective, 'not_relevant' otherwise>",
+2. **Document Relevance Evaluation:** Read the entire document with the goal of identifying any and all information that could be useful. Think broadly about relevance. Relevant information is not just a direct answer; it can be:
+    - Directly Answering: Information that directly addresses the question or objective.
+    - Contextual: Background information, definitions of key terms, historical context, or details that help in understanding the main topic.
+    - Supporting Evidence: Specific data points, statistics, quotes, case studies, or examples that validate or illustrate points.
+    - Methodological: Information about how the knowledge was obtained (e.g., the methodology of a study, the source of a claim).
+    - Alternative Perspectives: Counterarguments, differing opinions, or alternative viewpoints presented in the document.
+    - Related Concepts: Tangential information that is closely related and provides a more nuanced understanding or suggests further avenues of exploration.
+3. **Thought Process**: Provide a step-by-step analysis for each document. Your reasoning should explain your relevance decision and justify why you've categorized the extracted information in a particular way.
+4. **Information Extraction:** If the document is relevant, extract the information that can help answer the question or fulfill the current step's objective.
+5. **Output Format:** Respond in the following JSON structure with the following fields:
 - "reasoning": "<Step-by-step reasoning process explaining how you arrived at the evaluation result>"
-- "extracted_information": "<A paragraph describing the relevant information with bullet points. Each bullet point should contain: the information summary, original quoted text from the document, and explanation of how it relates to the question/objective. If not relevant, leave as empty string>"
-
-**Key Requirements:**
-- Always include exact quotes from the original document as proof
-- Structure information as bullet points within a flowing paragraph
-- Explain the relevance and confidence for each extracted piece
-- Extract information even if it only partially addresses the question
+- "decision": "<'relevant' if the document is relevant to the question and the current step's objective, 'not_relevant' otherwise>",
+- "extracted_information": "<Extracted information from the document that is relevant to the question and the current step's objective or an empty string if the document is not relevant>"
 
 Here are some examples: {examples}
 
@@ -68,8 +60,11 @@ Document: {document}
 """
 
 class EvaluateRetrievedDocumentOutput(pydantic.BaseModel):
-    decision: str
     reasoning: str
+    decision: Literal['relevant', 'not_relevant'] = pydantic.Field(
+        ...,
+        pattern=r"^(relevant|not_relevant)$",
+    )
     extracted_information: str
 
 

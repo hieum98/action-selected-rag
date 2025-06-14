@@ -1,66 +1,35 @@
 import pydantic
 
 
-DIRECT_ANSWER_PROMPT = """You are an expert assistant specializing in precise, evidence-based question answering. For each task, you will receive a question and optionally supporting context. Your goal is to deliver an accurate, well-reasoned answer with complete transparency about your reasoning process.
+DIRECT_ANSWER_PROMPT = """You are an expert assistant specializing in precise, well-reasoned question answering. For each task, you will receive a question and, optionally, supporting context. Your goal is to deliver a direct, accurate answer, accompanied by transparent, step-by-step reasoning. 
 
-## Core Objectives:
-1. **Direct Answer Generation:** Provide a concise, direct answer to the question based on the provided context.
-2. **Transparent Reasoning:** Document your reasoning process in clear, logical steps, showing how you arrived at the answer.
+Instructions:
+1. **Question Analysis:** Carefully read and understand the question. Identify key components and clarify what is being asked.
+2. **Context Utilization:**  If context is provided, analyze it thoroughly. Extract and summarize all relevant information that may inform your answer.
+3. **Information Gap Identification:** If the context does not fully answer the question, identify missing information. Formulate specific follow-up queries that would help fill these gaps. Attempt to answer these queries based on your own knowledge.
+4. **Output Format:** Respond in the following JSON structure with following fields:
+- "additional_information": "<Any extra insights, caveats, or related facts (optional)>"
+- "reasoning": "<Reasoning  that led to the answer, including any assumptions made or steps taken to arrive at the conclusion>",
+- "answer": "<Direct answer to the question without any additional explanation or context>",
+- "detailed_answer": "<The complete answer, including any necessary explanations or clarifications. In this field, you should provide a comprehensive response that includes all relevant details, including the source of the information (i.e., the context or your own knowledge) and any assumptions made.>",
+- "confidence": "<Confidence level in the answer, one of 'high', 'medium', or 'low'>"
 
-## Decision Framework:
-**Answer Quality Criteria:**
-- **Relevance:** Directly addresses the question without unnecessary information
-- **Accuracy:** Based on the most reliable and relevant information available
-- **Clarity:** Clearly articulated without ambiguity
-- **Completeness:** Covers all aspects of the question as required
-**Reasoning Quality Criteria:**
-- **Logical Flow:** Follows a clear, logical progression from question to answer
-- **Evidence-Based:** Supported by relevant facts or data from the context
-- **Transparency:** Clearly explains how the answer was derived, including any assumptions or gaps in information
+Here are some examples: {examples}
 
-## Instructions:
-1. **Question Decomposition:** Break down complex questions into sub-components. Identify the question type (factual, analytical, comparative, etc.) and determine what evidence would constitute a complete answer.
-2. **Context Analysis:** If context is provided:
-    - Extract all relevant facts, data points, and claims
-    - Assess the credibility and completeness of the information
-    - Note any potential biases, limitations, or gaps
-    - Identify which parts directly address the question
-3. **Knowledge Integration:** For information gaps:
-    - Clearly distinguish between context-derived facts and general knowledge
-    - State confidence levels for claims not supported by context
-    - Use your general knowledge to fill gaps if necessary, but clearly indicate which parts are based on general knowledge versus the provided context
-4. **Answer Construction:** 
-    - Start with the most direct response possible
-    - Qualify answers appropriately
-    - If multiple valid interpretations exist, acknowledge them
-5. **Reasoning Documentation:**
-    - Provide reasoning steps that lead to the answer
-    - Use clear, logical transitions between steps
-
-## Output Format:
-Respond in the following JSON structure with the following fields:
-- "reasoning": "<The reasoning process, including context analysis, knowledge gaps identified, and logical steps taken>",
-- "answer": "<Direct, qualified answer addressing the specific question asked. If using general knowledge, clearly indicate this>",
-- "confidence": "<High/Medium/Low based on evidence quality and completeness>",
-- "additional_information": "<Relevant caveats, limitations, or supplementary insights (optional)>"
-
-## Examples: 
-{examples}
-
----
-**Question:** 
-{question}
-**Context:** 
+Now, please answer the following question:
+Question: {question}
+Context: 
 {context}
 """
 
 
 class DirectAnswerOutput(pydantic.BaseModel):
+    additional_information: str
     reasoning: str
     answer: str
+    detailed_answer: str
     confidence: str = pydantic.Field(
         ...,
         pattern=r"^(high|medium|low)$",
     )
-    additional_information: str
 

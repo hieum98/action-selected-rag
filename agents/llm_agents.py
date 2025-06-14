@@ -370,23 +370,25 @@ class LLMAgent:
         Generate a response from the model.
         """
         use_cache = kwargs.pop('use_cache', self.use_cache)
+        if not use_cache:
+            return self.agent.generate(input, **kwargs)
+        
         input_messages = input['messages']
         response_class = input.get('json_schema', None)
         if response_class is not None:
             assert issubclass(response_class, BaseModel), "response_class must be a subclass of BaseModel"
         input_str = f"messages: {input_messages}, json_schema: {response_class}, kwargs: {kwargs}"
         input_hash = sha256(input_str.encode('utf-8')).hexdigest()
-        if use_cache:
-            cache_file = f"{self.cache_dir}/{input_hash}.json"
-            try:
-                response = self.load_from_cache(cache_file, response_class, input['index'])
-                # print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
-                return response
-            except:
-                response = self.agent.generate(input, **kwargs)
-                # Save the response to cache
-                self.save_to_cache(cache_file, response)
-                return response
+        cache_file = f"{self.cache_dir}/{input_hash}.json"
+        try:
+            response = self.load_from_cache(cache_file, response_class, input['index'])
+            # print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
+            return response
+        except:
+            response = self.agent.generate(input, **kwargs)
+            # Save the response to cache
+            self.save_to_cache(cache_file, response)
+            return response
     
     def batch_generate(
             self, 
@@ -399,20 +401,22 @@ class LLMAgent:
         """
         batch_with_index = [{'index': i, 'messages': messages} for i, messages in enumerate(batch)]
         use_cache = kwargs.pop('use_cache', self.use_cache)
+        if not use_cache:
+            return self.agent.batch_generate(batch, response_object=response_object, **kwargs)
+        
         responses = []
         to_compute = []
         for item in batch_with_index:
             input_str = f"messages: {item['messages']}, json_schema: {response_object}, kwargs: {kwargs}"
             input_hash = sha256(input_str.encode('utf-8')).hexdigest()
-            if use_cache:
-                cache_file = f"{self.cache_dir}/{input_hash}.json"
-                try:
-                    cached_response = self.load_from_cache(cache_file, response_object, item['index'])
-                    # print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
-                    responses.append(cached_response)
-                except:
-                    item['hash'] = input_hash
-                    to_compute.append(item)
+            cache_file = f"{self.cache_dir}/{input_hash}.json"
+            try:
+                cached_response = self.load_from_cache(cache_file, response_object, item['index'])
+                # print(f"Loaded cached response for input hash {input_hash} from {cache_file}")
+                responses.append(cached_response)
+            except:
+                item['hash'] = input_hash
+                to_compute.append(item)
         if len(to_compute) == 0:
             return responses
         to_compute_batch = [item['messages'] for item in to_compute]

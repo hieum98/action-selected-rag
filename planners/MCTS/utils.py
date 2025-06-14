@@ -166,7 +166,7 @@ if __name__ == "__main__":
     }
     retriever = Retriever(online_kwargs=retriever_online_kwargs)
 
-    question = "Are director of film Move (1970 Film) and director of film Méditerranée (1963 Film) from the same country?"
+    question = "Which magazine was started first Arthur's Magazine or First for Women?"
 
     solution = search(
         generator=generator,

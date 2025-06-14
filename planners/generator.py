@@ -115,7 +115,6 @@ class Generator:
             response_object = response.get('output', None)
             if response_object is not None:
                 if isinstance(response_object, evaluate.EvaluateAnswerOutput):
-                    # Normalize the decision to lowercase for consistency
                     answer_status = response_object.decision
                     answer_confidence = response_object.confidence
                     answer_confidence = answer_confidence.lower() if confidence else None
@@ -156,6 +155,52 @@ class Generator:
             'confidence': confidence,  # float: Confidence level of the evaluation result
         }
     
+    def batch_evaluate_answer(self, questions: List[str], correct_answers: List[Union[str, List[str]]], predicted_answers: List[str]):
+        assert len(questions) == len(correct_answers) == len(predicted_answers), "Questions, correct answers, and predicted answers must have the same length."
+        messages = []
+        for q, ca, pa in zip(questions, correct_answers, predicted_answers):
+            user_message = self.evaluate_answer_prompt.format(
+                examples=self.eval_examples if self.eval_examples else "",
+                question=q, 
+                correct_answer=ca, 
+                predicted_answer=pa
+            )
+            messages.append([{'role': 'user', 'content': user_message}])
+        start_time = time.time()
+        responses = self.llm_agent.batch_generate(batch=messages, response_object=evaluate.EvaluateAnswerOutput, n=1) # For batch processing, do not use multiple sampling
+        if self.verbose:
+            print(f"Time taken to batch evaluate answers: {time.time() - start_time:.2f} seconds")
+        results = []
+        confidence = []
+        reasoning = []
+        for response in responses:
+            response_object = response['output'][0].get('output', None)
+            assert response_object is not None, "Response object should not be None"
+            if isinstance(response_object, evaluate.EvaluateAnswerOutput):
+                if self.verbose:
+                    print(f"Response object: {response_object}")
+                answer_status = response_object.decision
+                answer_confidence = response_object.confidence
+                answer_confidence = answer_confidence.lower() if answer_confidence else None
+                if answer_confidence == 'high':
+                    confidence.append(1)
+                elif answer_confidence == 'medium':
+                    confidence.append(0.5)
+                else:
+                    confidence.append(0)
+                results.append(answer_status)
+                reasoning.append(response_object.reasoning)
+            else:
+                print(f"Warning: Response object is not of type EvaluateAnswerOutput: {response_object}")
+                results.append(False)
+                confidence.append(0.0)
+                reasoning.append("")
+        return {
+            'results': results,  # List[bool]: List of evaluation results for each question, True if the predicted answer matches the correct answer, False otherwise
+            'confidence': confidence,  # List[float]: List of confidence levels for each evaluation result, between 0 and 1
+            'reasoning': reasoning,  # List[str]: List of predicted answers to be evaluated
+        }
+
     def generate_direct_answer(self, question: str, context: str=None, **kwargs):
         """
         Generates a direct answer to a question using the LLM agent.
@@ -186,6 +231,7 @@ class Generator:
         if self.verbose:
             print(f"Time taken to generate direct answer: {time.time() - start_time:.2f} seconds")
         answers = []
+        detailed_answers = []
         reasoning = []
         additional_information = []
         confidence = []
@@ -196,6 +242,7 @@ class Generator:
                     if self.verbose:
                         print(f"Response object: {response_object}")
                     answers.append(response_object.answer)
+                    detailed_answers.append(response_object.detailed_answer)
                     reasoning.append(response_object.reasoning)
                     additional_information.append(response_object.additional_information)
                     answer_confidence = response_object.confidence.lower() if response_object.confidence else None
@@ -212,14 +259,68 @@ class Generator:
             print(f"Reasoning: {reasoning}")
             print(f"Additional information: {additional_information}")
             print(f"Confidence: {confidence}")
+            print(f"Detailed answers: {detailed_answers}")
 
         assert len(answers) == len(reasoning) == len(confidence), "Answers, reasoning, and confidence lists must be of the same length."
         return {
-            'answer': answers, # [str] 
+            'answer': answers, # [str]
+            'detailed_answer': detailed_answers,  # [str] Detailed answer with explanations
             'reasoning': reasoning,
             'additional_information': additional_information,
             'confidence': confidence  
         }    
+    
+    def batch_generate_direct_answer(self, questions: List[str], context: List[str]=None, **kwargs):
+        messages = []
+        context = context if context is not None else [''] * len(questions)
+        assert len(questions) == len(context), "Questions and context must have the same length."
+        for q, c in zip(questions, context):
+            user_message = self.generate_direct_answer_prompt.format(
+                examples=self.direct_answer_examples if self.direct_answer_examples else "",
+                question=q, 
+                context=c if c else ""
+            )
+            messages.append([{'role': 'user', 'content': user_message}])
+        start_time = time.time()
+        responses = self.llm_agent.batch_generate(batch=messages, response_object=generate_direct_answer.DirectAnswerOutput, n=1, **kwargs)  # For batch processing, do not use multiple sampling
+        if self.verbose:
+            print(f"Time taken to batch generate direct answers: {time.time() - start_time:.2f} seconds")
+        answers = []
+        detailed_answers = []
+        reasoning = []
+        additional_information = []
+        confidence = []
+        for response in responses:
+            response_object = response['output'][0].get('output', None)
+            assert response_object is not None, "Response object should not be None"
+            if isinstance(response_object, generate_direct_answer.DirectAnswerOutput):
+                if self.verbose:
+                    print(f"Response object: {response_object}")
+                answers.append(response_object.answer)
+                detailed_answers.append(response_object.detailed_answer)
+                reasoning.append(response_object.reasoning)
+                additional_information.append(response_object.additional_information)
+                answer_confidence = response_object.confidence.lower() if response_object.confidence else None
+                if answer_confidence == 'high':
+                    confidence.append(1)
+                elif answer_confidence == 'medium':
+                    confidence.append(0.5)
+                else:
+                    confidence.append(0)
+            else:
+                print(f"Warning: Response object is not of type DirectAnswerOutput: {response_object}")
+                answers.append("")
+                detailed_answers.append("")
+                reasoning.append("")
+                additional_information.append("")
+                confidence.append(0.0)
+        return {
+            'answer': answers,  # List[str]: List of direct answers generated for each question
+            'detailed_answer': detailed_answers,  # List[str]: List of detailed answers with explanations
+            'reasoning': reasoning,  # List[str]: List of reasoning for each answer
+            'additional_information': additional_information,  # List[str]: Additional information provided with the answer
+            'confidence': confidence  # List[float]: List of confidence levels for each answer, between 0 and 1
+        }
 
     def generate_follow_up_reasoning(self, question: str, context: str=None):
         """
@@ -252,7 +353,7 @@ class Generator:
         justifications = []
         answerable_main_question = []
         confidence = []
-        reasoning_types = []
+        should_gather_information = []
         for response in responses:
             response_object = response.get('output', None)
             if response_object is not None:
@@ -263,7 +364,7 @@ class Generator:
                     next_steps.append(response_object.next_step)
                     justifications.append(response_object.justification)
                     answer_confidence = response_object.confidence.lower() if response_object.confidence else None
-                    reasoning_types.append(response_object.inference_type.lower() != 'logical')
+                    should_gather_information.append(response_object.should_gather_information)
                     if answer_confidence == 'high':
                         confidence.append(1)
                     elif answer_confidence == 'medium':
@@ -277,7 +378,7 @@ class Generator:
             print(f"Justifications: {justifications}")
             print(f"Main question answerable: {answerable_main_question}")
             print(f"Confidence: {confidence}")
-            print(f"Reasoning types: {reasoning_types}")
+            print(f"should_gather_information: {should_gather_information}")
         # Majority voting for the main question answerability
         question_answerable = sum(answerable_main_question) / len(answerable_main_question) >= 0.5 if answerable_main_question else False
         assert len(next_steps) == len(answerable_main_question) == len(justifications), "Next steps, justifications, and answerable main question lists must be of the same length."
@@ -286,7 +387,7 @@ class Generator:
             'justification': justifications,
             'main_question_answerable': question_answerable,
             'confidence': confidence,  # [float] Confidence level of the next step, between 0 and 1
-            'need_answer': reasoning_types  
+            'need_answer': should_gather_information  # [bool] True if the next step requires gathering new information, False otherwise  
         }
     
     def generate_subquestion(self, question: str, context: str=None):
@@ -567,6 +668,44 @@ class Generator:
             'reasoning': reasoning
         }
 
+    def batch_generate_queries(self, questions: List[str], context: List[str]=None):
+        messages = []
+        context = context if context is not None else [''] * len(questions)
+        assert len(questions) == len(context), "Questions and context must have the same length."
+        for q, c in zip(questions, context):
+            user_message = self.generate_queries_prompt.format(
+                examples=self.generate_queries_examples if self.generate_queries_examples else "",
+                question=q, 
+                context=c if c else ""
+            )
+            messages.append([{'role': 'user', 'content': user_message}])
+        start_time = time.time()
+        responses = self.llm_agent.batch_generate(batch=messages, response_object=generate_query.QueriesGenerationOutput, n=1)
+        if self.verbose:
+            print(f"Time taken to batch generate queries: {time.time() - start_time:.2f} seconds")
+        queries = []
+        reasoning = []
+        answerable_main_question = []
+        for response in responses:
+            response_object = response['output'][0].get('output', None)
+            assert response_object is not None, "Response object should not be None"
+            if isinstance(response_object, generate_query.QueriesGenerationOutput):
+                if self.verbose:
+                    print(f"Response object: {response_object}")
+                queries.append(response_object.queries)
+                reasoning.append(response_object.reasoning)
+                answerable_main_question.append(response_object.answerable_main_question)
+            else:
+                print(f"Warning: Response object is not of type GenerateQueriesOutput: {response_object}")
+                queries.append([])
+                reasoning.append("")
+                answerable_main_question.append(False)
+        return {
+            'answerable_main_question': answerable_main_question,  # [bool] True if the main question can be answered with the provided context, False otherwise
+            'queries': queries,  # List[List[str]]: List of queries generated for each question
+            'reasoning': reasoning  # List[str]: Reasoning for each query generation
+        }
+        
     def score_reasoning(self, question: str, reasoning: str, correct_answer: Union[str, List[str]]=None):
         """
         Evaluates the quality of reasoning provided for a question, optionally comparing it to a correct answer.
@@ -836,7 +975,7 @@ class Generator:
 if __name__ == "__main__":
     # Example usage
     online_model_kwargs = {
-        'model_name': 'qwen3-32b',
+        'model_name': 'qwen3-8b',
         'url': 'http://n0999.talapas.uoregon.edu:30000/v1',
         'api_key': 'None',
         'concurrency': 64,
@@ -858,6 +997,28 @@ if __name__ == "__main__":
     context = "The director of the film Move (1970 Film) is John Smith, who is from the United States. The director of the film Méditerranée (1963 Film) is Jean Dupont, who is from France."
     correct_answer = ["No"]
     predicted_answer = "No, the directors are from different countries."
+
+    batch_questions = [
+        "Are director of film Move (1970 Film) and director of film Méditerranée (1963 Film) from the same country?",
+        "Who directed the film Move (1970 Film)?",
+        "Who directed the film Méditerranée (1963 Film)?"
+    ]
+    batch_correct_answers = [
+        ["No"],
+        ["John Smith"],
+        ["Jean Dupont"]
+    ]
+    batch_predicted_answers = [
+        "No, the directors are from different countries.",
+        "John Smith directed Move (1970 Film).",
+        "Jean Dupont directed Méditerranée (1963 Film)."
+    ]
+    queries = genrator.batch_generate_queries(batch_questions)
+    breakpoint()
+    direct_answers = genrator.batch_generate_direct_answer(batch_questions)
+    breakpoint()
+    evaluations = genrator.batch_evaluate_answer(batch_questions, batch_correct_answers, batch_predicted_answers)
+
     # Evaluate the answer
     # evaluation_result = genrator.evaluate_answer(question, correct_answer, predicted_answer)
     # breakpoint()
@@ -890,5 +1051,5 @@ if __name__ == "__main__":
     # same_question_result = genrator.evaluate_same_question(question, "Are the directors of Move (1970 Film) and Méditerranée (1963 Film) from the same country?")
     # breakpoint()
     # Generate queries to complement the context
-    queries_result = genrator.generate_queries(question, context='')
-    breakpoint()
+    # queries_result = genrator.generate_queries(question, context='')
+    # breakpoint()

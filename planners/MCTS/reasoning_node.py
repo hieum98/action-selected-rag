@@ -245,7 +245,7 @@ class ReasoningNode(Node):
                 supporting_information = self.get_supporting_information(query=next_step, instruction="query: ", main_query=user_question)
                 reasoning_output = self.generator.generate_direct_answer(question=next_step, context=supporting_information, n=1)
                 confidence = (reasoning_output['confidence'][0] + confidence) / 2.0  # Average the confidence scores
-                next_step = f"{next_step}\n{reasoning_output['answer'][0]}"
+                next_step = f"{next_step}\n{reasoning_output['detailed_answer'][0]}"
             node = ReasoningNode(
                 parent=self,
                 node_type=NodeType.REASONING,
@@ -278,7 +278,7 @@ class ReasoningNode(Node):
                 generator=self.generator,
                 retriever=self.retriever,
                 question=question,
-                answer=output['answer'][highest_confidence_index],
+                answer=output['detailed_answer'][highest_confidence_index],
                 confidence=output['confidence'][highest_confidence_index],
                 reasoning=None,  # Subquestions do not have reasoning content
                 **self.node_config  # Pass the node configuration to the new node
@@ -307,7 +307,7 @@ class ReasoningNode(Node):
                         generator=self.generator,
                         retriever=self.retriever,
                         question=subquestion,
-                        answer=output['answer'][highest_confidence_index],
+                        answer=output['detailed_answer'][highest_confidence_index],
                         confidence=highest_confidence,
                         reasoning=None,  # Subquestions do not have reasoning content
                         **self.node_config  # Pass the node configuration to the new node
@@ -386,7 +386,8 @@ class ReasoningNode(Node):
             direct_answer_nodes = self.generate_direct_answer_node()
             reasoning_nodes = self.generate_reasoning_node()
             subquestion_nodes = self.generate_subquestion_node()
-            rephrase_question_nodes = self.generate_rephrase_question_node()
+            # rephrase_question_nodes = self.generate_rephrase_question_node()
+            rephrase_question_nodes = []
             children = direct_answer_nodes + reasoning_nodes + subquestion_nodes + rephrase_question_nodes
         elif self.node_type == NodeType.DIRECT_ANSWER:
             # Direct answer nodes do not generate children, they are leaf nodes
@@ -400,7 +401,8 @@ class ReasoningNode(Node):
             direct_answer_nodes = self.generate_direct_answer_node()
             resubquestion_nodes = self.generate_resubquestion_node()
             reasoning_nodes = self.generate_reasoning_node()
-            rephrase_question_nodes = self.generate_rephrase_question_node()
+            # rephrase_question_nodes = self.generate_rephrase_question_node()
+            rephrase_question_nodes = []
             subquestion_nodes = self.generate_subquestion_node()
             children = direct_answer_nodes + resubquestion_nodes + reasoning_nodes + rephrase_question_nodes + subquestion_nodes
         elif self.node_type == NodeType.RESUBQUESTION:
@@ -555,7 +557,7 @@ if __name__=='__main__':
     }
     generate_kwargs = {
         'temperature': 0.6,
-        'n': 3, # should be odd number ás it is used for majority voting
+        'n': 1, # should be odd number ás it is used for majority voting
         'top_p': 0.95,
         'max_tokens': 8192,
         'top_k': 20,
@@ -602,16 +604,16 @@ if __name__=='__main__':
     # print(f"Generated {len(direct_answer_nodes)} direct answer nodes:")
     # for node in direct_answer_nodes:
     #     node.print_node()
-    # print("Generating reasoning node...")
-    # reasoning_nodes = root_node.generate_reasoning_node()
-    # print(f"Generated {len(reasoning_nodes)} reasoning nodes:")
-    # for node in reasoning_nodes:
-    #     node.print_node()
-    print("Generating subquestion node...")
-    subquestion_nodes = root_node.generate_subquestion_node()
-    print(f"Generated {len(subquestion_nodes)} subquestion nodes:")
-    for node in subquestion_nodes:
+    print("Generating reasoning node...")
+    reasoning_nodes = root_node.generate_reasoning_node()
+    print(f"Generated {len(reasoning_nodes)} reasoning nodes:")
+    for node in reasoning_nodes:
         node.print_node()
+    # print("Generating subquestion node...")
+    # subquestion_nodes = root_node.generate_subquestion_node()
+    # print(f"Generated {len(subquestion_nodes)} subquestion nodes:")
+    # for node in subquestion_nodes:
+    #     node.print_node()
     # print("Generating resubquestion node...")
     # resubquestion_nodes = subquestion_nodes[0].generate_resubquestion_node()  # Generate resubquestion from the first subquestion node
     # print(f"Generated {len(resubquestion_nodes)} resubquestion nodes:")
